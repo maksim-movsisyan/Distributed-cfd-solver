@@ -1,0 +1,18 @@
+# Build directories
+build/
+
+# Runtime output
+out/
+
+# Local progress notes (not part of the repository)
+PROGRESS.md
+
+# Test mesh data (copy locally, do not commit)
+mesh/
+
+# Editors / OS
+.cache/
+.vscode/
+.idea/
+*.swp
+compile_commands.json

@@ -11,71 +11,26 @@
 
 namespace {
 
-const char* cell_type_name(uint8_t t) {
-    switch (static_cast<CellType>(t)) {
-        case CellType::TRI:
-            return "Tri";
-        case CellType::QUAD:
-            return "Quad";
-        case CellType::TET:
-            return "Tetra";
-        case CellType::PYRA:
-            return "Pyramid";
-        case CellType::PRISM:
-            return "Wedge";
-        case CellType::HEXA:
-            return "Hexahedron";
-    }
-    return "?";
-}
+// One output cell: either an owned volume cell (data = global cell id) or a
+// boundary face (data = patch id).
+struct OutCell {
+    uint8_t type;  // CellType
+    int32_t nodes[8];
+    int nn;
+    int32_t data;
+};
 
-}  // namespace
-
-void write_vtu(const MeshPart& mp, const std::string& outdir, const std::string& stem) {
+// Write one VTU piece (all ranks write their own file) + the .pvtu
+// collection from rank 0. `data_name` is the CellData field carried by the
+// piece: "global_id" for the volume piece, "patch" for the boundary piece.
+void write_piece(const MeshPart& mp, const std::string& outdir, const std::string& stem,
+                 const std::vector<OutCell>& cells, const char* data_name) {
     int rank = 0, nprocs = 1;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
-    std::error_code ec;
-    std::filesystem::create_directories(outdir, ec);  // create the directory if needed
 
-    // Cells to write: owned cells (ghost=0) and boundary faces (ghost=2,
-    // patch id in 'patch'). Ghost cells are NOT exported: they duplicate
-    // neighbouring blocks and clutter the ParaView view.
-    struct OutCell {
-        uint8_t type;  // CellType
-        int32_t nodes[8];
-        int nn;
-        int32_t gid;
-        int32_t patch;
-        uint8_t ghost;
-    };
-    std::vector<OutCell> cells;
-    cells.reserve(mp.n_own + mp.n_faces);
-    for (int i = 0; i < mp.n_own; ++i) {
-        OutCell c{};
-        c.type = mp.cell_type[i];
-        c.nn = kNodesPerType[mp.cell_type[i]];
-        for (int k = 0; k < c.nn; ++k) c.nodes[k] = mp.cell_nodes[i * 8 + k];
-        c.gid = mp.cell_gid[i];
-        c.patch = -1;
-        c.ghost = 0;
-        cells.push_back(c);
-    }
-    for (int i = 0; i < mp.n_faces; ++i) {
-        if (mp.face_neigh[i] >= 0) continue;  // boundary faces only
-        OutCell c{};
-        c.type = mp.face_type[i];
-        c.nn = (c.type == static_cast<uint8_t>(CellType::TRI)) ? 3 : 4;
-        for (int k = 0; k < c.nn; ++k) c.nodes[k] = mp.face_nodes[i * 4 + k];
-        c.gid = -1;
-        c.patch = mp.face_patch[i];
-        c.ghost = 2;
-        cells.push_back(c);
-    }
     const int nc = static_cast<int>(cells.size());
-
-    // The point array is simply the local nodes.
-    const int npts = mp.n_nodes;
+    const int npts = mp.n_nodes;  // the point array is simply the local nodes
 
     char path[512];
     std::snprintf(path, sizeof path, "%s/%s_%05d.vtu", outdir.c_str(), stem.c_str(), rank);
@@ -125,18 +80,17 @@ void write_vtu(const MeshPart& mp, const std::string& outdir, const std::string&
     std::fprintf(f, "\n        </DataArray>\n      </Cells>\n");
 
     std::fprintf(f, "      <CellData>\n");
-    auto scalar_arr = [&](const char* type, const char* name, auto get) {
-        std::fprintf(f,
-                     "        <DataArray type=\"%s\" Name=\"%s\" "
-                     "format=\"ascii\">\n          ",
-                     type, name);
-        for (const OutCell& c : cells) std::fprintf(f, "%d ", (int)get(c));
-        std::fprintf(f, "\n        </DataArray>\n");
-    };
-    scalar_arr("Int32", "rank", [&](const OutCell&) { return mp.rank; });
-    scalar_arr("UInt8", "ghost", [&](const OutCell& c) { return c.ghost; });
-    scalar_arr("Int32", "global_id", [&](const OutCell& c) { return c.gid; });
-    scalar_arr("Int32", "patch", [&](const OutCell& c) { return c.patch; });
+    std::fprintf(f,
+                 "        <DataArray type=\"Int32\" Name=\"rank\" "
+                 "format=\"ascii\">\n          ");
+    for (int i = 0; i < nc; ++i) std::fprintf(f, "%d ", mp.rank);
+    std::fprintf(f, "\n        </DataArray>\n");
+    std::fprintf(f,
+                 "        <DataArray type=\"Int32\" Name=\"%s\" "
+                 "format=\"ascii\">\n          ",
+                 data_name);
+    for (const OutCell& c : cells) std::fprintf(f, "%d ", c.data);
+    std::fprintf(f, "\n        </DataArray>\n");
     std::fprintf(f, "      </CellData>\n");
 
     std::fprintf(f, "    </Piece>\n  </UnstructuredGrid>\n</VTKFile>\n");
@@ -156,14 +110,12 @@ void write_vtu(const MeshPart& mp, const std::string& outdir, const std::string&
         std::fprintf(pf,
                      "<VTKFile type=\"PUnstructuredGrid\" version=\"0.1\" "
                      "byte_order=\"LittleEndian\">\n");
-        std::fprintf(pf, "  <PUnstructuredGrid GhostLevel=\"1\">\n");
+        std::fprintf(pf, "  <PUnstructuredGrid GhostLevel=\"0\">\n");
         std::fprintf(pf, "    <PPointData>\n");
         std::fprintf(pf, "    </PPointData>\n");
         std::fprintf(pf, "    <PCellData>\n");
         std::fprintf(pf, "      <PDataArray type=\"Int32\" Name=\"rank\"/>\n");
-        std::fprintf(pf, "      <PDataArray type=\"UInt8\" Name=\"ghost\"/>\n");
-        std::fprintf(pf, "      <PDataArray type=\"Int32\" Name=\"global_id\"/>\n");
-        std::fprintf(pf, "      <PDataArray type=\"Int32\" Name=\"patch\"/>\n");
+        std::fprintf(pf, "      <PDataArray type=\"Int32\" Name=\"%s\"/>\n", data_name);
         std::fprintf(pf, "    </PCellData>\n");
         std::fprintf(pf, "    <PPoints>\n");
         std::fprintf(pf,
@@ -176,4 +128,42 @@ void write_vtu(const MeshPart& mp, const std::string& outdir, const std::string&
         std::fclose(pf);
         log_stat("VTU: %s", ppath);
     }
+}
+
+}  // namespace
+
+void write_vtu(const MeshPart& mp, const std::string& outdir, const std::string& stem) {
+    std::error_code ec;
+    std::filesystem::create_directories(outdir, ec);  // create the directory if needed
+
+    // Two pieces per rank, each with strictly valid field values:
+    //   <stem>_XXXXX.vtu     — owned volume cells only (CellData: rank,
+    //                          global_id). Ghost cells are NOT exported: they
+    //                          duplicate neighbouring blocks and were already
+    //                          verified visually.
+    //   <stem>_bnd_XXXXX.vtu — boundary faces only (CellData: rank, patch).
+    std::vector<OutCell> volume;
+    volume.reserve(mp.n_own);
+    for (int i = 0; i < mp.n_own; ++i) {
+        OutCell c{};
+        c.type = mp.cell_type[i];
+        c.nn = kNodesPerType[mp.cell_type[i]];
+        for (int k = 0; k < c.nn; ++k) c.nodes[k] = mp.cell_nodes[i * 8 + k];
+        c.data = mp.cell_gid[i];
+        volume.push_back(c);
+    }
+    std::vector<OutCell> boundary;
+    boundary.reserve(mp.n_faces);
+    for (int i = 0; i < mp.n_faces; ++i) {
+        if (mp.face_neigh[i] >= 0) continue;  // boundary faces only
+        OutCell c{};
+        c.type = mp.face_type[i];
+        c.nn = (c.type == static_cast<uint8_t>(CellType::TRI)) ? 3 : 4;
+        for (int k = 0; k < c.nn; ++k) c.nodes[k] = mp.face_nodes[i * 4 + k];
+        c.data = mp.face_patch[i];
+        boundary.push_back(c);
+    }
+
+    write_piece(mp, outdir, stem, volume, "global_id");
+    write_piece(mp, outdir, stem + "_bnd", boundary, "patch");
 }

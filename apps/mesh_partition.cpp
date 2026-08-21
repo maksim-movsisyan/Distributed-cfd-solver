@@ -130,7 +130,8 @@ int main(int argc, char** argv) {
     }
 
     write_mesh_file(out, mp, gm);
-    if (rank == 0) write_bc_config(mp, bcfile);
+    // Collective (allreduce inside); only rank 0 writes the file.
+    write_bc_config(mp, bcfile);
     write_vtu(mp, vtudir, "part");
 
     // --- 8. Final statistics ---

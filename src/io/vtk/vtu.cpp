@@ -38,8 +38,9 @@ void write_vtu(const MeshPart& mp, const std::string& outdir, const std::string&
     std::error_code ec;
     std::filesystem::create_directories(outdir, ec);  // create the directory if needed
 
-    // Cells to write: owned (ghost=0), ghosts (ghost=1), boundary faces
-    // (ghost=2, patch id in 'patch').
+    // Cells to write: owned cells (ghost=0) and boundary faces (ghost=2,
+    // patch id in 'patch'). Ghost cells are NOT exported: they duplicate
+    // neighbouring blocks and clutter the ParaView view.
     struct OutCell {
         uint8_t type;  // CellType
         int32_t nodes[8];
@@ -49,15 +50,15 @@ void write_vtu(const MeshPart& mp, const std::string& outdir, const std::string&
         uint8_t ghost;
     };
     std::vector<OutCell> cells;
-    cells.reserve(mp.n_cells + mp.n_faces);
-    for (int i = 0; i < mp.n_cells; ++i) {
+    cells.reserve(mp.n_own + mp.n_faces);
+    for (int i = 0; i < mp.n_own; ++i) {
         OutCell c{};
         c.type = mp.cell_type[i];
         c.nn = kNodesPerType[mp.cell_type[i]];
         for (int k = 0; k < c.nn; ++k) c.nodes[k] = mp.cell_nodes[i * 8 + k];
         c.gid = mp.cell_gid[i];
         c.patch = -1;
-        c.ghost = (i >= mp.n_own) ? 1 : 0;
+        c.ghost = 0;
         cells.push_back(c);
     }
     for (int i = 0; i < mp.n_faces; ++i) {

@@ -11,20 +11,22 @@
 
 namespace {
 
-// One output cell: either an owned volume cell (data = global cell id) or a
-// boundary face (data = patch id).
+// One output cell: either an owned volume cell (data = global cell id,
+// data2 = rank-local cell index) or a boundary face (data = patch id).
 struct OutCell {
     uint8_t type;  // CellType
     int32_t nodes[8];
     int nn;
     int32_t data;
+    int32_t data2;
 };
 
 // Write one VTU piece (all ranks write their own file) + the .pvtu
-// collection from rank 0. `data_name` is the CellData field carried by the
-// piece: "global_id" for the volume piece, "patch" for the boundary piece.
+// collection from rank 0. `data_name` is the main CellData field ("global_id"
+// for volume, "patch" for boundary); `data2_name`, when not null, adds a
+// second field from OutCell::data2 ("local_id" for the volume piece).
 void write_piece(const MeshPart& mp, const std::string& outdir, const std::string& stem,
-                 const std::vector<OutCell>& cells, const char* data_name) {
+                 const std::vector<OutCell>& cells, const char* data_name, const char* data2_name) {
     int rank = 0, nprocs = 1;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
@@ -91,6 +93,14 @@ void write_piece(const MeshPart& mp, const std::string& outdir, const std::strin
                  data_name);
     for (const OutCell& c : cells) std::fprintf(f, "%d ", c.data);
     std::fprintf(f, "\n        </DataArray>\n");
+    if (data2_name != nullptr) {
+        std::fprintf(f,
+                     "        <DataArray type=\"Int32\" Name=\"%s\" "
+                     "format=\"ascii\">\n          ",
+                     data2_name);
+        for (const OutCell& c : cells) std::fprintf(f, "%d ", c.data2);
+        std::fprintf(f, "\n        </DataArray>\n");
+    }
     std::fprintf(f, "      </CellData>\n");
 
     std::fprintf(f, "    </Piece>\n  </UnstructuredGrid>\n</VTKFile>\n");
@@ -116,6 +126,8 @@ void write_piece(const MeshPart& mp, const std::string& outdir, const std::strin
         std::fprintf(pf, "    <PCellData>\n");
         std::fprintf(pf, "      <PDataArray type=\"Int32\" Name=\"rank\"/>\n");
         std::fprintf(pf, "      <PDataArray type=\"Int32\" Name=\"%s\"/>\n", data_name);
+        if (data2_name != nullptr)
+            std::fprintf(pf, "      <PDataArray type=\"Int32\" Name=\"%s\"/>\n", data2_name);
         std::fprintf(pf, "    </PCellData>\n");
         std::fprintf(pf, "    <PPoints>\n");
         std::fprintf(pf,
@@ -138,9 +150,9 @@ void write_vtu(const MeshPart& mp, const std::string& outdir, const std::string&
 
     // Two pieces per rank, each with strictly valid field values:
     //   <stem>_XXXXX.vtu     — owned volume cells only (CellData: rank,
-    //                          global_id). Ghost cells are NOT exported: they
-    //                          duplicate neighbouring blocks and were already
-    //                          verified visually.
+    //                          global_id, local_id). Ghost cells are NOT
+    //                          exported: they duplicate neighbouring blocks
+    //                          and were already verified visually.
     //   <stem>_bnd_XXXXX.vtu — boundary faces only (CellData: rank, patch).
     std::vector<OutCell> volume;
     volume.reserve(mp.n_own);
@@ -150,6 +162,7 @@ void write_vtu(const MeshPart& mp, const std::string& outdir, const std::string&
         c.nn = kNodesPerType[mp.cell_type[i]];
         for (int k = 0; k < c.nn; ++k) c.nodes[k] = mp.cell_nodes[i * 8 + k];
         c.data = mp.cell_gid[i];
+        c.data2 = i;  // rank-local index (SFC-ordered)
         volume.push_back(c);
     }
     std::vector<OutCell> boundary;
@@ -164,6 +177,6 @@ void write_vtu(const MeshPart& mp, const std::string& outdir, const std::string&
         boundary.push_back(c);
     }
 
-    write_piece(mp, outdir, stem, volume, "global_id");
-    write_piece(mp, outdir, stem + "_bnd", boundary, "patch");
+    write_piece(mp, outdir, stem, volume, "global_id", "local_id");
+    write_piece(mp, outdir, stem + "_bnd", boundary, "patch", nullptr);
 }

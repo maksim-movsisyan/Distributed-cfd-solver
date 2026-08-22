@@ -8,7 +8,7 @@ out/
 PROGRESS.md
 
 # Test mesh data (copy locally, do not commit)
-mesh/
+/mesh/
 
 # Editors / OS
 .cache/

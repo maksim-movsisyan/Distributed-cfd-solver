@@ -7,17 +7,43 @@
 
 #include <cstdio>
 #include <string>
+#include <cstdio>
+#include <cstdlib>
+#include <iostream>
 
-#include "cfd/io/solver_mesh/h5util.hpp"
-#include "cfd/io/solver_mesh/loader.hpp"
+#include "cfd/io/solver_mesh/hdf5_reader.hpp"
 #include "cfd/io/vtk/vtu.hpp"
+#include "cfd/mesh/localmesh.hpp"
+#include "cfd/mesh/validate.hpp"
 #include "cfd/mpi/log.hpp"
 
 int main(int argc, char** argv) {
-    MPI_Init(&argc, &argv);
-    int rank = 0;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    // MPI initialization 
+    int provided_thread_level = MPI_THREAD_SINGLE;
+    const int init_status = 
+        MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided_thread_level);
 
+    if (init_status != MPI_SUCCESS) { 
+        std::cerr << "MPI_Init_thread failed\n"; return EXIT_FAILURE;
+    }
+
+
+    // get local rank index and total process number
+    int rank = 0, nprocs = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+
+
+    // check if target thread level is avaliable
+    if (provided_thread_level < MPI_THREAD_FUNNELED) {
+        if (rank == 0) {
+            std::cerr << "MPI did not provide the requested thread level\n";
+        }
+        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+    }
+
+
+    // parsing arguments
     std::string in, vtudir;
     int verbose = 0;
     for (int i = 1; i < argc; ++i) {
@@ -39,26 +65,20 @@ int main(int argc, char** argv) {
         MPI_Finalize();
         return 1;
     }
-    log_init(verbose);
+    cfd::mpi::log_init(verbose);
+    cfd::mpi::log_info("solver_mesh_check: input=%s, ranks=%d", in.c_str(), nprocs);
 
-    const double t0 = MPI_Wtime();
-    H5Obj file = h5_open_file_rdonly(in);
+    double t0 = MPI_Wtime();
+    cfd::mesh::MeshPart mp;
+    cfd::io::solver_mesh::import_mesh_hdf5(mp, in, MPI_COMM_WORLD);
 
-    GlobalMeta gm = load_global_meta(file);
-    MeshPart mp;
-    load_partition(file, rank, gm, mp);
-    const double t1 = MPI_Wtime();
+    // Exhaustive Sanity Check & Global Diagnostics  
+    cfd::mesh::validate_and_log_meshpart(mp);
 
-    print_mesh_stats(mp, gm);
+    if (!vtudir.empty()) cfd::io::vtk::write_vtu(mp, vtudir, "loaded", MPI_COMM_WORLD);
 
-    const bool ok = verify_partition(mp, gm);
-    if (rank == 0) {
-        log_info("Verification: %s", ok ? "OK — the file is consistent" : "FAILED (see above)");
-        log_info("load time: %.3f s", t1 - t0);
-    }
-
-    if (!vtudir.empty()) write_vtu(mp, vtudir, "loaded");
-
+    double t1 = MPI_Wtime() - t0;
+    if (rank == 0) std::fprintf(stderr, "Total executional time = %.5f sec\n", t1);
     MPI_Finalize();
-    return ok ? 0 : 2;
+    return EXIT_SUCCESS;
 }

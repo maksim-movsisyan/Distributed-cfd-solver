@@ -1,11 +1,12 @@
 #include "cfd/mpi/log.hpp"
 
 #include <mpi.h>
-
 #include <cstdarg>
 #include <cstdio>
 
 int g_verbose = 0;
+
+namespace cfd::mpi {
 
 static int mpi_rank() {
     int r = 0;
@@ -52,3 +53,14 @@ void log_warn_rank(const char* fmt, ...) {
     vpr(mpi_rank(), "WARNING: ", fmt, ap);
     va_end(ap);
 }
+
+void fatal(MPI_Comm comm, const std::string& what) {
+    int r = 0;
+    if (comm != MPI_COMM_NULL) {
+        MPI_Comm_rank(comm, &r);
+    }
+    std::fprintf(stderr, "[Rank %d] CGNS Reader Fatal Error: %s\n", r, what.c_str());
+    std::fflush(stderr);
+    MPI_Abort(comm != MPI_COMM_NULL ? comm : MPI_COMM_WORLD, 1);
+}
+} //namespace cfd::mpi

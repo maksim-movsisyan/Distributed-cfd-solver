@@ -100,6 +100,18 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 #==================================================================
+#==== GLOBAL INDEX DATATYPE =======================================
+#==================================================================
+option(CFD_INDEX_64BIT "Enable 64-bit global mesh indices" OFF)
+
+if(CFD_INDEX_64BIT)
+    add_compile_definitions(CFD_INDEX_64BIT)
+    message(STATUS "Global indexing: 64-bit (int64_t)")
+else()
+    message(STATUS "Global indexing: 32-bit (int32_t)")
+endif()
+
+#==================================================================
 #==== LIBRARIES ===================================================
 #==================================================================
     #================
@@ -138,12 +150,12 @@ target_link_libraries(
 add_library(
     cfd_mesh
     STATIC
-        src/mesh/sfc.cpp
+        src/mesh/geometry.cpp
         src/mesh/faces.cpp
         src/mesh/localmesh.cpp
-        src/mesh/geometry.cpp
-        src/mesh/bc.cpp
-        src/mesh/coords.cpp
+        src/mesh/reorder.cpp
+        src/mesh/bc_config.cpp
+        src/mesh/validate.cpp
 )
 
 target_include_directories(
@@ -212,7 +224,6 @@ target_link_libraries(
         CGNS::cgns_static
         cfd_project_options
         cfd_mpi
-        cfd_mesh
     PRIVATE
         cfd_project_warnings
 )
@@ -223,9 +234,8 @@ target_link_libraries(
 add_library(
     cfd_solver_mesh_io
     STATIC
-        src/io/solver_mesh/h5util.cpp
-        src/io/solver_mesh/writer.cpp
-        src/io/solver_mesh/loader.cpp
+        src/io/solver_mesh/hdf5_writer.cpp
+        src/io/solver_mesh/hdf5_reader.cpp
         src/io/vtk/vtu.cpp
 )
 
@@ -239,10 +249,11 @@ target_include_directories(
 target_link_libraries(
     cfd_solver_mesh_io
     PUBLIC
-        cfd_mesh
         MPI::MPI_CXX
         HDF5::HDF5
         cfd_project_options
+        cfd_mesh
+        cfd_partition
     PRIVATE
         cfd_project_warnings
 )
@@ -261,9 +272,11 @@ target_link_libraries(
         cfd_project_warnings
         cfd_project_options
         cfd_cgns_io
-        cfd_partition
-        cfd_mesh
-        cfd_solver_mesh_io
+          
+        cfd_mpi      
+        cfd_mesh      
+        cfd_partition  
+        cfd_solver_mesh_io          
 )
 
     #=============================
@@ -274,9 +287,12 @@ add_executable(solver_mesh_check apps/solver_mesh_check.cpp)
 target_link_libraries(
     solver_mesh_check
     PRIVATE
-        cfd_project_warnings
-        cfd_project_options
-        cfd_solver_mesh_io
+    cfd_project_warnings
+    cfd_project_options
+
+    cfd_mpi      
+    cfd_mesh      
+    cfd_solver_mesh_io 
 )
 
 #==================================================================

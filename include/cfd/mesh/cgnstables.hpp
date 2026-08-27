@@ -10,17 +10,20 @@
 // (validate_face_tables() in geometry.cpp); on failure the program aborts
 // with a message instead of silently producing corrupted geometry.
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <array>
+#include "cfd/core/types.hpp"
 
-enum class CellType : uint8_t {
-    TET = 0,
-    PYRA = 1,
+namespace cfd::mesh {
+
+enum class CellType : std::uint8_t {
+    TET   = 0,
+    PYRA  = 1,
     PRISM = 2,
-    HEXA = 3,
-    TRI = 4,
-    QUAD = 5,
+    HEXA  = 3,
+    TRI   = 4,
+    QUAD  = 5,
 };
 
 // Nodes per element of each type.
@@ -34,6 +37,7 @@ constexpr int kFaceNodes[4][6] = {
     {3, 4, 4, 4, 3, 0},  // PRISM
     {4, 4, 4, 4, 4, 4},  // HEXA
 };
+
 // Local nodes of each face (0-based indices into the cell node list);
 // the order yields the outward normal by the right-hand rule.
 constexpr int kFaceTable[4][6][4] = {
@@ -44,6 +48,7 @@ constexpr int kFaceTable[4][6][4] = {
      {0, 2, 1, -1},  // opposite n3
      {-1, -1, -1, -1},
      {-1, -1, -1, -1}},
+
     // PYRA: base n0..n3 (CCW seen from the apex n4), apex n4
     {{0, 3, 2, 1},  // base (normal down)
      {0, 1, 4, -1},
@@ -51,6 +56,7 @@ constexpr int kFaceTable[4][6][4] = {
      {2, 3, 4, -1},
      {3, 0, 4, -1},
      {-1, -1, -1, -1}},
+
     // PRISM: bottom triangle n0,n1,n2 (CCW seen from top), n3 above n0
     {{0, 2, 1, -1},  // bottom
      {0, 1, 4, 3},
@@ -58,6 +64,7 @@ constexpr int kFaceTable[4][6][4] = {
      {2, 0, 3, 5},
      {3, 4, 5, -1},  // top
      {-1, -1, -1, -1}},
+
     // HEXA: bottom n0..n3 (CCW seen from top), n4 above n0
     {{0, 3, 2, 1},  // bottom
      {0, 1, 5, 4},
@@ -117,12 +124,19 @@ inline const char* cell_type_name(CellType t) {
 
 // Face key: sorted global node ids (4 slots, -1 = unused).
 struct FaceKey {
-    int32_t v[4] = {-1, -1, -1, -1};
-    bool operator==(const FaceKey& o) const {
+    std::array<GlobalIndex, 4> v = {
+        kInvalidGlobalIndex, 
+        kInvalidGlobalIndex, 
+        kInvalidGlobalIndex, 
+        kInvalidGlobalIndex
+    };
+
+    constexpr bool operator==(const FaceKey& o) const noexcept {
         return v[0] == o.v[0] && v[1] == o.v[1] && v[2] == o.v[2] && v[3] == o.v[3];
     }
-    bool operator<(const FaceKey& o) const {
-        for (int i = 0; i < 4; ++i) {
+
+    constexpr bool operator<(const FaceKey& o) const noexcept {
+        for (std::size_t i = 0; i < 4; ++i) {
             if (v[i] != o.v[i]) return v[i] < o.v[i];
         }
         return false;
@@ -130,16 +144,14 @@ struct FaceKey {
 };
 
 struct FaceKeyHash {
-    size_t operator()(const FaceKey& k) const {
-        uint64_t h = 1469598103934665603ull;
-        for (int i = 0; i < 4; ++i) {
-            h ^= static_cast<uint32_t>(k.v[i]);
-            h *= 1099511628211ull;
+    [[nodiscard]] std::size_t operator()(const FaceKey& k) const noexcept {
+        std::uint64_t h = 1469598103934665603ULL;
+        for (std::size_t i = 0; i < 4; ++i) {
+            h ^= static_cast<std::uint64_t>(k.v[i]);
+            h *= 1099511628211ULL;
         }
-        return static_cast<size_t>(h);
+        return static_cast<std::size_t>(h);
     }
 };
 
-// Self-check of the tables on reference elements; returns true on success,
-// prints diagnostics and returns false on failure.
-bool validate_face_tables();
+} //namespace cfd::mesh

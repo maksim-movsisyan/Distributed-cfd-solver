@@ -1,20 +1,108 @@
-#pragma once
 // Small MPI helpers: block distribution and all-to-all for vectors of PODs.
+#pragma once
+
 #include <mpi.h>
-
+#include <concepts>
 #include <vector>
+#include <cstddef>
+#include <algorithm> 
+#include <limits>
 
-// Balanced block distribution of n elements over p parts:
+#include "cfd/mpi/log.hpp"
+
+namespace cfd::mpi {
+// Balanced block distribution of n elements over p parts (blcoks):
 // displs[i]..displs[i+1] — rank i owns displs[i]..displs[i+1] (displs has size p+1).
-std::vector<long long> block_displ(long long n, int p);
+template <std::integral integer>
+std::vector<integer> block_displ(integer n, std::size_t p) {
+    std::vector<integer> result(p + 1, 0);
+    std::size_t num_el = static_cast<std::size_t>(n);
+
+    for (std::size_t i = 0; i < p; ++i) {
+        result[i + 1] = result[i] + static_cast<integer>((num_el / p) + ((num_el % p) > i ? 1 : 0));
+    }
+
+    return result;   
+}
 
 // Owner of element g under the block distribution.
-int block_owner(long long g, const std::vector<long long>& displ);
+template <std::integral integer>
+int block_owner(integer g, const std::vector<integer>& displ) {
+    if (g < displ.front() || g >= displ.back()) { return -1; }
+    auto it = std::upper_bound(displ.begin(), displ.end(), g);
 
-// All-to-all of POD structs (T must be trivially copyable).
-// in[i] is the buffer for rank i; returns out[i], the buffer from rank i.
-template <class T>
-std::vector<std::vector<T>> alltoall_vec(const std::vector<std::vector<T>>& in);
+    return static_cast<int>(std::distance(displ.begin(), it)) - 1;
+}
+
+// Generic zero-overhead all-to-all packed transfer for trivially copyable types.
+template <typename T>
+void alltoallv_packed(
+    MPI_Comm comm, int nprocs,
+    const std::vector<int>& send_counts,
+    const std::vector<T>& send_buf,
+    std::vector<T>& recv_buf) {
+        
+    static_assert(std::is_trivially_copyable_v<T>, 
+                  "T must be trivially copyable for raw MPI byte transfers!");
+
+    const auto nprocs_sz = static_cast<std::size_t>(nprocs);
+    if (send_counts.size() != nprocs_sz) {
+        fatal(comm, "alltoallv_packed, send_counts size must match nprocs");
+    }
+
+    // 1. Collective exchange of element counts
+    std::vector<int> recv_counts(nprocs_sz, 0);
+    MPI_Alltoall(send_counts.data(), 1, MPI_INT, 
+                 recv_counts.data(), 1, MPI_INT, comm);
+
+    // 2. Single-pass computation of byte counts & byte displacements with overflow guards
+    std::vector<int> send_bytes(nprocs_sz), recv_bytes(nprocs_sz);
+    std::vector<int> sdispls_bytes(nprocs_sz), rdispls_bytes(nprocs_sz);
+
+    std::size_t total_send_elems = 0;
+    std::size_t total_recv_elems = 0;
+    std::size_t curr_sdispl_bytes = 0;
+    std::size_t curr_rdispl_bytes = 0;
+
+    constexpr std::size_t kMpiMax = static_cast<std::size_t>(std::numeric_limits<int>::max());
+
+    for (std::size_t i = 0; i < nprocs_sz; ++i) {
+        const std::size_t sc = static_cast<std::size_t>(send_counts[i]);
+        const std::size_t rc = static_cast<std::size_t>(recv_counts[i]);
+
+        const std::size_t sb = sc * sizeof(T);
+        const std::size_t rb = rc * sizeof(T);
+
+        if (sb > kMpiMax || rb > kMpiMax || 
+            curr_sdispl_bytes > kMpiMax || curr_rdispl_bytes > kMpiMax) {
+            fatal(comm, "alltoallv_packed: Data size or displacement exceeds MPI INT_MAX limit.");
+        }
+
+        send_bytes[i] = static_cast<int>(sb);
+        recv_bytes[i] = static_cast<int>(rb);
+        sdispls_bytes[i] = static_cast<int>(curr_sdispl_bytes);
+        rdispls_bytes[i] = static_cast<int>(curr_rdispl_bytes);
+
+        total_send_elems += sc;
+        total_recv_elems += rc;
+        curr_sdispl_bytes += sb;
+        curr_rdispl_bytes += rb;
+    }
+
+    if (total_send_elems != send_buf.size()) {
+        mpi::fatal(comm, "alltoallv_packed: send_buf.size() does not match sum of send_counts.");
+    }
+
+    // 3. Allocate exact receive buffer
+    recv_buf.resize(total_recv_elems);
+
+    // 4. Perform collective exchange
+    MPI_Alltoallv(
+        send_buf.data(), send_bytes.data(), sdispls_bytes.data(), MPI_BYTE,
+        recv_buf.data(), recv_bytes.data(), rdispls_bytes.data(), MPI_BYTE,
+        comm
+    );
+}
 
 // Global sum/min/max (short wrappers).
 long long ll_sum(long long local);
@@ -24,4 +112,4 @@ double d_sum(double local);
 double d_min(double local);
 double d_max(double local);
 
-#include "mpi_util_impl.hpp"
+}

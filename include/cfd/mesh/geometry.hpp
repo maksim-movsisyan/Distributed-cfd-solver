@@ -1,21 +1,24 @@
-#pragma once
 // Cell and face geometry plus a self-check of the canonical face tables.
+#pragma once
 
 #include "cfd/mesh/cgnstables.hpp"
 #include "cfd/mesh/localmesh.hpp"
 
-// Polyhedron volume from the cell nodes: V = (1/3) sum_f (S_f . c_f),
-// where S_f is the face area vector (fan over the canonical node order)
-// and c_f the face centroid. Exact for convex cells with planar faces.
-// pts holds the cell node coordinates (3 * kNodesPerType values).
-double poly_cell_volume(CellType t, const double* pts);
+namespace cfd::mesh {
 
-// Final local-mesh geometry: cell centroids/volumes (owned + ghosts),
-// face centroids/areas/normals (normal outward from the owner). Verifies
-// sign consistency; prints diagnostics and returns false on failure.
-bool compute_geometry(MeshPart& mp);
+// Polyhedron volume from cell node coordinates (SoA layout):
+// V = (1/3) sum_f (S_f · c_f), where S_f is the outward area normal vector
+// and c_f is the face centroid. Exact for convex polyhedra with planar faces.
+// x, y, z must contain at least kNodesPerType[t] coordinates.
+[[nodiscard]] double poly_cell_volume(CellType t, 
+                                      const double* x, 
+                                      const double* y, 
+                                      const double* z) noexcept;
 
-// Self-check of the tables on reference elements (TET/PYRA/PRISM/HEXA):
-// positive volume, outward normals of all faces, and a working
-// orientation-flip permutation. Call once on rank 0.
+// Self-check of canonical tables on reference elements (TET/PYRA/PRISM/HEXA):
+// verifies positive volume, outward normals for all faces, and orientation inversion.
 bool validate_face_tables();
+
+void compute_mesh_geometry(MeshPart& mp);
+
+} //namespace cfd::mesh

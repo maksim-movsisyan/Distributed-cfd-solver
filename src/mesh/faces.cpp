@@ -1,134 +1,442 @@
 #include "cfd/mesh/faces.hpp"
 
-#include <mpi.h>
-
 #include <algorithm>
-#include <unordered_map>
+#include <array>
+#include <cassert>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <vector>
 
+#include "cfd/core/types.hpp"
 #include "cfd/mpi/log.hpp"
 #include "cfd/mpi/mpi_util.hpp"
 
+namespace cfd::mesh {
+
 namespace {
 
-// CSR assembly message: cell self has neighbour other.
-struct EdgeMsg {
-    int32_t self, other;
+// =============================================================================
+// HPC Communication Buffers & POD Messages
+// =============================================================================
+
+// Phase 1 message: Sent to the rendezvous owner of min(FaceKey.v[0])
+struct alignas(8) HalfFaceMsg {
+    FaceKey key;
+    GlobalIndex cell_id = kInvalidGlobalIndex; // Volume cell GID (or kInvalidGlobalIndex if SurfElem)
+    PatchId patch = kInvalidPatchId;          // BC Patch ID (if SurfElem)
+    std::uint8_t lface = 0;                   // Local face index [0..5]
+    std::uint8_t is_surf = 0;                 // 1 if surface element, 0 if volume face
+
+    bool operator<(const HalfFaceMsg& o) const noexcept {
+        return key < o.key;
+    }
 };
 
-}  // namespace
+// Phase 2 message: Directed dual graph adjacency edge (for remote cell_b owner)
+struct alignas(8) DualEdgeMsg {
+    GlobalIndex cell_u = kInvalidGlobalIndex; // Local cell on target rank
+    GlobalIndex cell_v = kInvalidGlobalIndex; // Adjacent neighbour cell
+};
 
-void build_faces(RawMesh& m, std::vector<FaceRec>& faces, DualGraph& g, FaceStats& st) {
-    const int nprocs = m.nprocs, rank = m.rank;
-    const long long nl = m.n_local();
+// Binary search rank locator over monotonic (nprocs + 1) displacement array
+inline int find_owner_rank(GlobalIndex gid, const std::vector<GlobalIndex>& displ) noexcept {
+    auto it = std::upper_bound(displ.begin(), displ.end(), gid);
+    return static_cast<int>(std::distance(displ.begin(), it) - 1);
+}
 
-    // --- 1. Generate the faces of own cells ---
-    std::vector<std::vector<FaceRec>> outgoing(nprocs);
-    {
-        long long reserve_hint = 4 * nl / nprocs + 16;
-        for (int p = 0; p < nprocs; ++p) outgoing[p].reserve(reserve_hint);
+// Construct canonical sorted FaceKey using fixed 4-slot array with -1 sentinel padding
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Warray-bounds"
+
+inline FaceKey make_sorted_face_key(const GlobalIndex* raw_nodes, int node_count) noexcept {
+    FaceKey k{};
+    for (int i = 0; i < node_count; ++i) {
+        k.v[static_cast<std::size_t>(i)] = raw_nodes[static_cast<std::size_t>(i)];
     }
-    for (long long i = 0; i < nl; ++i) {
-        const int t = m.ctype[i];
-        const int nf = kFacesPerType[t];
-        const int32_t* cn = &m.cnodes[i * 8];
-        for (int f = 0; f < nf; ++f) {
-            const int nn = kFaceNodes[t][f];
-            FaceRec fr;
-            for (int j = 0; j < nn; ++j) fr.key.v[j] = cn[kFaceTable[t][f][j]];
-            std::sort(fr.key.v, fr.key.v + 4);  // the -1 tail stays at the end
-            fr.cell_a = m.cgid[i];
-            fr.cell_b = -1;
-            outgoing[block_owner(fr.key.v[0], m.node_displ)].push_back(fr);
+
+    if (node_count > 1) {
+        const std::size_t safe_count = std::min(static_cast<std::size_t>(node_count), k.v.size());
+        std::sort(k.v.begin(), k.v.begin() + safe_count);
+    }
+    return k;
+}
+
+#pragma GCC diagnostic pop
+
+} // namespace
+
+BuildFacesResult build_faces(const RawMesh& m) {
+    // get local rank index and total ranks count
+    const int nprocs = m.nprocs;
+    const int rank = m.rank;
+    const MPI_Comm comm = m.comm;
+
+    // get loca number of cells
+    const LocalIndex n_loc_cells = m.n_local_cells();
+
+
+    // -------------------------------------------------------------------------
+    // Phase 1: Generate Half-Faces & Surface Elements -> Rendezvous by min(node)
+    // -------------------------------------------------------------------------
+    std::vector<int> p1_send_counts(static_cast<std::size_t>(nprocs), 0);
+
+    // Pass 1.1: Count send items per rank (Volume cells)
+    std::size_t cnode_offset = 0;
+    // loop over all local cells
+    for (std::size_t c = 0; c < static_cast<std::size_t>(n_loc_cells); ++c) {
+        // get cell type
+        const std::size_t type_idx = static_cast<std::size_t>(m.ctype[c]);
+        if (!is_volume_type(m.ctype[c])) {
+            mpi::fatal(comm, "Cell type must be 3D");
         }
+
+        // get number of cell faces
+        const std::size_t num_faces = static_cast<std::size_t>(kFacesPerType[type_idx]);
+
+        // loop over all cell faces
+        for (std::size_t f = 0; f < num_faces; ++f) {
+            // get number of nodes per face
+            const std::size_t fn_count = static_cast<std::size_t>(kFaceNodes[type_idx][f]);
+
+            std::array<GlobalIndex, 4> fnodes{};
+
+            // loop over all face nodes
+            for (std::size_t i = 0; i < fn_count; ++i) {
+                // get local node index (in cell nodes array)
+                const std::size_t local_node = static_cast<std::size_t>(kFaceTable[type_idx][f][i]);
+
+                // write global face-node index
+                fnodes[i] = m.cnodes[cnode_offset + local_node];
+            } // end loop over face nodes
+
+            // creating face key
+            const FaceKey key = make_sorted_face_key(fnodes.data(), static_cast<int>(fn_count));
+
+            // find destination of face (owner rank, choosen by initial contiguous distribution)
+            const int dest = find_owner_rank(key.v[0], m.node_displ);
+
+            // increase number of faces, owned by each rank
+            ++p1_send_counts[static_cast<std::size_t>(dest)];
+        } // end loop over all cell faces
+
+        // increase offset
+        cnode_offset += static_cast<std::size_t>(kNodesPerType[type_idx]);
+    } // end loop over all local cells
+
+    // Pass 1.2: Count send items for surface elements
+    for (const auto& surf : m.surf_elems) {
+        const int dest = find_owner_rank(surf.key.v[0], m.node_displ);
+        ++p1_send_counts[static_cast<std::size_t>(dest)];
     }
 
-    // --- 2. Deduplicate on the minimal-node owners ---
-    auto dedup = alltoall_vec(outgoing);
-    outgoing.clear();
-    std::unordered_map<FaceKey, FaceRec, FaceKeyHash> table;
-    table.reserve(dedup.size() * 2 + 16);
-    long long nonmanifold = 0;
-    for (auto& buf : dedup) {
-        for (FaceRec& fr : buf) {
-            auto it = table.find(fr.key);
-            if (it == table.end()) {
-                table.emplace(fr.key, fr);
-            } else if (it->second.cell_b < 0) {
-                // second cell; the smaller gid becomes cell_a
-                if (fr.cell_a < it->second.cell_a) {
-                    it->second.cell_b = it->second.cell_a;
-                    it->second.cell_a = fr.cell_a;
-                } else {
-                    it->second.cell_b = fr.cell_a;
-                }
+
+    // Allocate Phase 1 send buffer with prefix cursors
+    std::vector<int> p1_sdispls(static_cast<std::size_t>(nprocs + 1), 0);
+    for (int i = 0; i < nprocs; ++i) {
+        std::size_t ii = static_cast<std::size_t>(i);
+        p1_sdispls[ii + 1] = p1_sdispls[ii] + p1_send_counts[ii];
+    }
+    std::vector<HalfFaceMsg> p1_send_buf(static_cast<std::size_t>(p1_sdispls[static_cast<std::size_t>(nprocs)]));
+    std::vector<int> p1_cursors = p1_sdispls;
+
+    // Fill Phase 1 send buffer (Volume cells)
+    cnode_offset = 0;
+    // loop over all local cells
+    for (std::size_t c = 0; c < static_cast<std::size_t>(n_loc_cells); ++c) {
+        // get cell global index, type and face count
+        const GlobalIndex cell_gid = m.global_cell_id(static_cast<LocalIndex>(c));
+        const std::size_t type_idx = static_cast<std::size_t>(m.ctype[c]);
+        const std::size_t num_faces = static_cast<std::size_t>(kFacesPerType[type_idx]);
+
+        // loop over all cell faces
+        for (std::size_t f = 0; f < num_faces; ++f) {
+            // get number of face nodes
+            const std::size_t fn_count = static_cast<std::size_t>(kFaceNodes[type_idx][f]);
+
+            std::array<GlobalIndex, 4> fnodes{};
+            // loop over all face nodes
+            for (std::size_t i = 0; i < fn_count; ++i) {
+                // get local face-node index (in cell nodes)
+                const std::size_t local_node = static_cast<std::size_t>(kFaceTable[type_idx][f][i]);
+
+                // write global face-node index
+                fnodes[i] = m.cnodes[cnode_offset + local_node];
+            } // end loop over all face nodes
+
+            // creating face key
+            const FaceKey key = make_sorted_face_key(fnodes.data(), static_cast<int>(fn_count));
+
+            // find destination of face
+            const int dest = find_owner_rank(key.v[0], m.node_displ);
+
+            // write data in buffer
+            p1_send_buf[static_cast<std::size_t>(p1_cursors[static_cast<std::size_t>(dest)]++)] = 
+            HalfFaceMsg{
+                key, cell_gid, kInvalidPatchId, static_cast<std::uint8_t>(f), 0
+            };
+        } // end loop over cell faces
+
+        // increase offsets
+        cnode_offset += static_cast<std::size_t>(kNodesPerType[type_idx]);
+    }
+
+    // Fill Phase 1 send buffer (Surface elements)
+    for (const auto& surf : m.surf_elems) {
+        // find owner rank
+        const int dest = find_owner_rank(surf.key.v[0], m.node_displ);
+
+        p1_send_buf[static_cast<std::size_t>(p1_cursors[static_cast<std::size_t>(dest)]++)] =
+            HalfFaceMsg{
+            surf.key, kInvalidGlobalIndex, surf.patch, 0, 1
+        };
+    }
+
+
+    // Exchange Phase 1 messages
+    std::vector<HalfFaceMsg> p1_recv_buf;
+    mpi::alltoallv_packed(comm, nprocs, p1_send_counts, p1_send_buf, p1_recv_buf);
+
+    // Free send buffers early to release memory pressure
+    p1_send_buf.clear();
+    p1_send_buf.shrink_to_fit();
+
+
+
+    // -------------------------------------------------------------------------
+    // Phase 2: Deduplication on Rendezvous Ranks & Matching
+    // -------------------------------------------------------------------------
+    // sort my faces (that i'v received) by key
+    std::sort(p1_recv_buf.begin(), p1_recv_buf.end());
+
+    // initialize arrays
+    std::vector<int> p2_face_counts(static_cast<std::size_t>(nprocs), 0);
+    std::vector<int> p2_edge_counts(static_cast<std::size_t>(nprocs), 0);
+
+    struct MatchedFace {
+        FaceRec rec;
+        int rank_a = 0;
+        int rank_b = -1;
+    };
+    std::vector<MatchedFace> matched_faces;
+    matched_faces.reserve(p1_recv_buf.size() / 2);
+
+    const std::size_t total_recv = p1_recv_buf.size();
+    // loop over all received faces
+    for (std::size_t i = 0; i < total_recv;) {
+        // find number of duplicates (exclusive) = size of face group
+        std::size_t j = i + 1;
+        while (j < total_recv && p1_recv_buf[i].key == p1_recv_buf[j].key) {
+            ++j;
+        }
+
+        HalfFaceMsg vol_faces[2];
+        int vol_count = 0;
+        PatchId patch = kInvalidPatchId;
+
+        // loop over all face-group
+        for (std::size_t k = i; k < j; ++k) {
+            // get received face
+            const auto& item = p1_recv_buf[k];
+            if (item.is_surf) {
+                patch = item.patch;
             } else {
-                ++nonmanifold;  // a third cell at one face
+                if (vol_count < 2) {
+                    vol_faces[vol_count++] = item;
+                } else {
+                    mpi::fatal(comm, "HPC Error: Non-manifold mesh detected (>2 cells sharing a face)!");
+                }
+            }
+        } // end loop over all face group
+
+        if (vol_count == 2) {
+            // Interior Face
+            GlobalIndex c1 = vol_faces[0].cell_id;
+            GlobalIndex c2 = vol_faces[1].cell_id;
+            std::uint8_t lf1 = vol_faces[0].lface;
+            std::uint8_t lf2 = vol_faces[1].lface;
+
+            if (c1 > c2) {
+                std::swap(c1, c2);
+                std::swap(lf1, lf2);
+            }
+
+            const int r_a = find_owner_rank(c1, m.cell_displ);
+            const int r_b = find_owner_rank(c2, m.cell_displ);
+
+            matched_faces.push_back({
+                FaceRec{vol_faces[0].key, c1, c2, kInvalidPatchId, lf1, lf2},
+                r_a, r_b
+            });
+            ++p2_face_counts[static_cast<std::size_t>(r_a)];
+
+            if (r_a != r_b) {
+                ++p2_edge_counts[static_cast<std::size_t>(r_b)]; // Back-edge for dual graph (cell_b -> cell_a)
+            }
+        } else if (vol_count == 1) {
+            // Boundary Face
+            const GlobalIndex c1 = vol_faces[0].cell_id;
+            const int r_a = find_owner_rank(c1, m.cell_displ);
+
+            matched_faces.push_back({
+                FaceRec{vol_faces[0].key, c1, kInvalidGlobalIndex, patch, vol_faces[0].lface, 255},
+                r_a, -1
+            });
+            ++p2_face_counts[static_cast<std::size_t>(r_a)];
+        }
+
+        i = j;
+    } // end loop over all received faces
+
+    // Free Phase 1 recv buffer
+    p1_recv_buf.clear();
+    p1_recv_buf.shrink_to_fit();
+
+
+
+    // -------------------------------------------------------------------------
+    // Phase 3: Dispatch Matched Faces & Graph Edges to Cell Owners
+    // -------------------------------------------------------------------------
+    std::vector<int> p2_face_sdispls(static_cast<std::size_t>(nprocs) + 1, 0);
+    std::vector<int> p2_edge_sdispls(static_cast<std::size_t>(nprocs) + 1, 0);
+    for (std::size_t k = 0; k < static_cast<std::size_t>(nprocs); ++k) {
+        p2_face_sdispls[k + 1] = p2_face_sdispls[k] + p2_face_counts[k];
+        p2_edge_sdispls[k + 1] = p2_edge_sdispls[k] + p2_edge_counts[k];
+    }
+
+    std::size_t total_sfaces = static_cast<std::size_t>(p2_face_sdispls[static_cast<std::size_t>(nprocs)]);
+    std::size_t total_sedges = static_cast<std::size_t>(p2_edge_sdispls[static_cast<std::size_t>(nprocs)]);
+
+    std::vector<FaceRec> p2_face_send(total_sfaces);
+    std::vector<DualEdgeMsg> p2_edge_send(total_sedges);
+    std::vector<int> p2_face_cursors = p2_face_sdispls;
+    std::vector<int> p2_edge_cursors = p2_edge_sdispls;
+
+    // loop over all faces that I own (by node-based distribution above)
+    for (const auto& mf : matched_faces) {
+        p2_face_send[static_cast<std::size_t>(p2_face_cursors[static_cast<std::size_t>(mf.rank_a)]++)] = mf.rec;
+        if (mf.rank_b != -1 && mf.rank_a != mf.rank_b) {
+            p2_edge_send[static_cast<std::size_t>(p2_edge_cursors[static_cast<std::size_t>(mf.rank_b)]++)] 
+                = DualEdgeMsg{mf.rec.cell_b, mf.rec.cell_a};
+        }
+    } // end loop over all faces
+
+    matched_faces.clear();
+    matched_faces.shrink_to_fit();
+
+    // perform data exchange, after each step every rank get 
+    // it's own faces and face edges to build dual graph
+    std::vector<FaceRec> local_faces;
+    std::vector<DualEdgeMsg> remote_edges;
+    mpi::alltoallv_packed(comm, nprocs, p2_face_counts, p2_face_send, local_faces);
+    mpi::alltoallv_packed(comm, nprocs, p2_edge_counts, p2_edge_send, remote_edges);
+
+    p2_face_send.clear();
+    p2_edge_send.clear();
+
+
+
+    // -------------------------------------------------------------------------
+    // Phase 4: Assembly of Dual Graph CSR & Face Statistics
+    // -------------------------------------------------------------------------
+    BuildFacesResult result;
+    result.faces = std::move(local_faces);
+
+    const GlobalIndex my_cell_start = m.cell_displ[static_cast<std::size_t>(rank)];
+    const GlobalIndex my_cell_end = m.cell_displ[static_cast<std::size_t>(rank) + 1];
+    std::vector<LocalIndex> deg(static_cast<std::size_t>(n_loc_cells), 0);
+
+    GlobalIndex local_ifaces = 0;
+    GlobalIndex local_bfaces = 0;
+
+    // loop over all my faces
+    for (const auto& f : result.faces) {
+        if (f.cell_b != kInvalidGlobalIndex) {
+            ++local_ifaces;
+            // Edge cell_a -> cell_b
+
+            // get local cell index
+            const auto u = static_cast<LocalIndex>(f.cell_a - my_cell_start);
+            assert(u >= 0 && u < n_loc_cells);
+            ++deg[static_cast<std::size_t>(u)];
+
+            // If cell_b is also local, add edge cell_b -> cell_a immediately
+            if (f.cell_b >= my_cell_start && f.cell_b < my_cell_end) {
+                const auto v = static_cast<LocalIndex>(f.cell_b - my_cell_start);
+                ++deg[static_cast<std::size_t>(v)];
+            }
+        } else {
+            ++local_bfaces;
+        }
+    } // end loop over all my faces
+
+    // Remote back-edge contributions
+    for (const auto& e : remote_edges) {
+        // get local cell index
+        const auto v = static_cast<LocalIndex>(e.cell_u - my_cell_start);
+        assert(v >= 0 && v < n_loc_cells);
+        ++deg[static_cast<std::size_t>(v)];
+    }
+
+    // Build CSR offsets
+    result.graph.offsets.resize(static_cast<std::size_t>(n_loc_cells) + 1, 0);
+    for (std::size_t i = 0; i < static_cast<std::size_t>(n_loc_cells); ++i) {
+        result.graph.offsets[i + 1] = result.graph.offsets[i] + deg[i];
+    }
+
+    // Fill CSR adj array
+    result.graph.adj.resize(static_cast<std::size_t>(result.graph.offsets[static_cast<std::size_t>(n_loc_cells)]));
+    std::vector<LocalIndex> head = result.graph.offsets;
+
+    // loop over all my faces
+    for (const auto& f : result.faces) {
+        if (f.cell_b != kInvalidGlobalIndex) {
+            // get local cell index
+            const auto u = static_cast<LocalIndex>(f.cell_a - my_cell_start);
+            result.graph.adj[static_cast<std::size_t>(head[static_cast<std::size_t>(u)]++)] = f.cell_b;
+
+            if (f.cell_b >= my_cell_start && f.cell_b < my_cell_end) {
+                const auto v = static_cast<LocalIndex>(f.cell_b - my_cell_start);
+                result.graph.adj[static_cast<std::size_t>(head[static_cast<std::size_t>(v)]++)] = f.cell_a;
             }
         }
-    }
-    dedup.clear();
-    nonmanifold = ll_sum(nonmanifold);
-    if (nonmanifold > 0) {
-        log_rank("NON-MANIFOLD MESH: %lld faces with 3+ cells, aborting", nonmanifold);
-        MPI_Abort(MPI_COMM_WORLD, 2);
-    }
+    } // end loop over all my faces
 
-    // --- 3. Face -> owner of the smaller cell; edges -> both sides ---
-    std::vector<std::vector<FaceRec>> face_out(nprocs);
-    std::vector<std::vector<EdgeMsg>> edge_out(nprocs);
-    for (const auto& kv : table) {
-        const FaceRec& fr = kv.second;
-        const int pa = block_owner(fr.cell_a, m.cell_displ);
-        face_out[pa].push_back(fr);
-        if (fr.cell_b >= 0) {  // dual-graph edge: interior faces only
-            edge_out[pa].push_back({fr.cell_a, fr.cell_b});
-            const int pb = block_owner(fr.cell_b, m.cell_displ);
-            edge_out[pb].push_back({fr.cell_b, fr.cell_a});
-        }
-    }
-    table.clear();
-
-    auto face_in = alltoall_vec(face_out);
-    face_out.clear();
-    auto edge_in = alltoall_vec(edge_out);
-    edge_out.clear();
-
-    faces.clear();
-    for (auto& buf : face_in) faces.insert(faces.end(), buf.begin(), buf.end());
-    face_in.clear();
-
-    // --- 4. CSR dual graph ---
-    g.offsets.assign(nl + 1, 0);
-    std::vector<int32_t> cnt(nl + 1, 0);
-    for (auto& buf : edge_in)
-        for (const EdgeMsg& e : buf) ++cnt[e.self - m.cell_displ[rank]];
-    for (long long i = 0; i < nl; ++i) g.offsets[i + 1] = g.offsets[i] + cnt[i];
-    g.adj.assign(g.offsets[nl], -1);
-    {
-        std::vector<long long> pos(g.offsets.begin(), g.offsets.end() - 1);
-        for (auto& buf : edge_in)
-            for (const EdgeMsg& e : buf) g.adj[pos[e.self - m.cell_displ[rank]]++] = e.other;
-        edge_in.clear();
+    for (const auto& e : remote_edges) {
+        const auto v = static_cast<LocalIndex>(e.cell_u - my_cell_start);
+        result.graph.adj[static_cast<std::size_t>(head[static_cast<std::size_t>(v)]++)] = e.cell_v;
     }
 
-    // --- Statistics ---
-    long long nb = 0;
-    for (const FaceRec& f : faces) nb += (f.cell_b < 0);
-    st.n_faces_g = ll_sum(faces.size());
-    st.n_bfaces_g = ll_sum(nb);
-    st.n_ifaces_g = st.n_faces_g - st.n_bfaces_g;
-    // Global counts only: per-rank record numbers carry no information.
-    log_stat("Faces: global %lld (boundary %lld, interior %lld)", st.n_faces_g, st.n_bfaces_g,
-             st.n_ifaces_g);
-
-    // Consistency check: sum(cell faces) = 2*interior + boundary.
-    long long sum_cell_faces = 0;
-    for (long long i = 0; i < nl; ++i) sum_cell_faces += kFacesPerType[m.ctype[i]];
-    const long long scf = ll_sum(sum_cell_faces);
-    const long long expect_b = scf - 2 * st.n_ifaces_g;
-    if (expect_b != st.n_bfaces_g) {
-        log_rank("FACE INCONSISTENCY: expected %lld boundary faces, got %lld", expect_b,
-                 st.n_bfaces_g);
-        MPI_Abort(MPI_COMM_WORLD, 2);
+    // Sort adjacencies for each vertex (ParMETIS/Scotch binary search requirement)
+    for (LocalIndex i = 0; i < n_loc_cells; ++i) {
+        const LocalIndex start = result.graph.offsets[static_cast<std::size_t>(i)];
+        const LocalIndex end = result.graph.offsets[static_cast<std::size_t>(i + 1)];
+        std::sort(result.graph.adj.begin() + start, result.graph.adj.begin() + end);
     }
+
+    // Single collective reduction for global stats
+    const std::int64_t local_stats[4] = {
+        static_cast<std::int64_t>(result.faces.size()),
+        static_cast<std::int64_t>(local_bfaces),
+        static_cast<std::int64_t>(local_ifaces),
+        static_cast<std::int64_t>(result.graph.adj.size())
+    };
+    std::int64_t global_stats[4] = {0, 0, 0, 0};
+
+    MPI_Allreduce(local_stats, global_stats, 4, MPI_INT64_T, MPI_SUM, comm);
+
+    result.stats.n_faces_g = static_cast<GlobalIndex>(global_stats[0]);
+    result.stats.n_bfaces_g = static_cast<GlobalIndex>(global_stats[1]);
+    result.stats.n_ifaces_g = static_cast<GlobalIndex>(global_stats[2]);
+    result.stats.n_dg_edges = static_cast<GlobalIndex>(global_stats[3]);
+
+    mpi::log_stat("INFO[Faces]: Total face count=%lld, Boundary face count=%lld, Interior face count=%lld", 
+                    static_cast<int64_t>(result.stats.n_faces_g), 
+                    static_cast<int64_t>(result.stats.n_bfaces_g), 
+                    static_cast<int64_t>(result.stats.n_ifaces_g));
+    mpi::log_stat("INFO[Dual Graph]: Total edges=%lld", static_cast<int64_t>(result.stats.n_dg_edges));
+
+    return result;
 }
+
+} // namespace cfd::mesh

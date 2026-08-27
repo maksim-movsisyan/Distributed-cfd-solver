@@ -1,182 +1,346 @@
 #include "cfd/io/vtk/vtu.hpp"
 
 #include <mpi.h>
-
 #include <cstdio>
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
 
+#include "cfd/mesh/cgnstables.hpp"
 #include "cfd/mpi/log.hpp"
+
+namespace cfd::io::vtk {
 
 namespace {
 
-// One output cell: either an owned volume cell (data = global cell id,
-// data2 = rank-local cell index) or a boundary face (data = patch id).
-struct OutCell {
-    uint8_t type;  // CellType
-    int32_t nodes[8];
-    int nn;
-    int32_t data;
-    int32_t data2;
-};
+constexpr LocalIndex kInvalidLocal = static_cast<LocalIndex>(-1);
 
-// Write one VTU piece (all ranks write their own file) + the .pvtu
-// collection from rank 0. `data_name` is the main CellData field ("global_id"
-// for volume, "patch" for boundary); `data2_name`, when not null, adds a
-// second field from OutCell::data2 ("local_id" for the volume piece).
-void write_piece(const MeshPart& mp, const std::string& outdir, const std::string& stem,
-                 const std::vector<OutCell>& cells, const char* data_name, const char* data2_name) {
-    int rank = 0, nprocs = 1;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+// Maps internal CellType to VTK Unstructured Grid cell type ID
+[[nodiscard]] inline uint8_t to_vtk_cell_type(mesh::CellType type) noexcept {
+    switch (type) {
+        case mesh::CellType::TRI:   return 5;  // VTK_TRIANGLE
+        case mesh::CellType::QUAD:  return 9;  // VTK_QUAD
+        case mesh::CellType::TET:   return 10; // VTK_TETRA
+        case mesh::CellType::HEXA:  return 12; // VTK_HEXAHEDRON
+        case mesh::CellType::PRISM: return 13; // VTK_WEDGE
+        case mesh::CellType::PYRA:  return 14; // VTK_PYRAMID
+        default:                    return 0;  // VTK_EMPTY_CELL
+    }
+}
 
-    const int nc = static_cast<int>(cells.size());
-    const int npts = mp.n_nodes;  // the point array is simply the local nodes
+// =============================================================================
+// 1. Volume Piece Writer (Owned Cells [0, n_own))
+// =============================================================================
 
-    char path[512];
-    std::snprintf(path, sizeof path, "%s/%s_%05d.vtu", outdir.c_str(), stem.c_str(), rank);
-    FILE* f = std::fopen(path, "w");
+void write_volume_vtu(
+    const mesh::MeshPart& mp,
+    const std::string& outdir,
+    const std::string& stem) {
+    const int rank = mp.rank;
+    const int n_cells = static_cast<int>(mp.n_own);
+    const int n_pts   = static_cast<int>(mp.n_nodes);
+
+    char filepath[512];
+    std::snprintf(filepath, sizeof(filepath), "%s/%s_%05d.vtu", outdir.c_str(), stem.c_str(), rank);
+
+    FILE* f = std::fopen(filepath, "wb");
     if (!f) {
-        log_warn_rank("could not open %s", path);
+        mpi::log_stat("WARNING: Could not open VTU file: %s", filepath);
         return;
     }
+
+    // 1MB I/O buffer to minimize POSIX write syscalls
+    std::vector<char> io_buffer(1024 * 1024);
+    std::setvbuf(f, io_buffer.data(), _IOFBF, io_buffer.size());
+
     std::fprintf(f, "<?xml version=\"1.0\"?>\n");
-    std::fprintf(f,
-                 "<VTKFile type=\"UnstructuredGrid\" version=\"0.1\" "
-                 "byte_order=\"LittleEndian\">\n");
+    std::fprintf(f, "<VTKFile type=\"UnstructuredGrid\" version=\"0.1\" byte_order=\"LittleEndian\">\n");
     std::fprintf(f, "  <UnstructuredGrid>\n");
-    std::fprintf(f, "    <Piece NumberOfPoints=\"%d\" NumberOfCells=\"%d\">\n", npts, nc);
+    std::fprintf(f, "    <Piece NumberOfPoints=\"%d\" NumberOfCells=\"%d\">\n", n_pts, n_cells);
 
-    std::fprintf(f,
-                 "      <Points>\n        <DataArray type=\"Float64\" "
-                 "NumberOfComponents=\"3\" format=\"ascii\">\n");
-    for (int i = 0; i < npts; ++i)
-        std::fprintf(f, "          %.17g %.17g %.17g\n", mp.node_xyz[3 * i], mp.node_xyz[3 * i + 1],
-                     mp.node_xyz[3 * i + 2]);
-    std::fprintf(f, "        </DataArray>\n      </Points>\n");
+    // Points Coordinates (SoA -> 3D components)
+    std::fprintf(f, "      <Points>\n");
+    std::fprintf(f, "        <DataArray type=\"Float64\" NumberOfComponents=\"3\" format=\"ascii\">\n");
+    for (int i = 0; i < n_pts; ++i) {
+        const auto i_sz = static_cast<std::size_t>(i);
+        std::fprintf(f, "          %.16g %.16g %.16g\n", mp.node_x[i_sz], mp.node_y[i_sz], mp.node_z[i_sz]);
+    }
+    std::fprintf(f, "        </DataArray>\n");
+    std::fprintf(f, "      </Points>\n");
 
-    std::fprintf(f,
-                 "      <Cells>\n        <DataArray type=\"Int32\" "
-                 "Name=\"connectivity\" format=\"ascii\">\n");
-    for (const OutCell& c : cells) {
+    // Cells Section
+    std::fprintf(f, "      <Cells>\n");
+
+    // Connectivity via CSR offsets (Zero extra allocations)
+    std::fprintf(f, "        <DataArray type=\"Int32\" Name=\"connectivity\" format=\"ascii\">\n");
+    for (int c = 0; c < n_cells; ++c) {
+        const auto c_sz = static_cast<std::size_t>(c);
+        const LocalIndex start = mp.cell_nodes_offsets[c_sz];
+        const LocalIndex end   = mp.cell_nodes_offsets[c_sz + 1];
+
         std::fprintf(f, "          ");
-        for (int k = 0; k < c.nn; ++k) std::fprintf(f, "%d ", c.nodes[k]);
+        for (LocalIndex k = start; k < end; ++k) {
+            std::fprintf(f, "%d ", mp.cell_nodes[static_cast<std::size_t>(k)]);
+        }
         std::fprintf(f, "\n");
     }
     std::fprintf(f, "        </DataArray>\n");
-    std::fprintf(f,
-                 "        <DataArray type=\"Int32\" Name=\"offsets\" "
-                 "format=\"ascii\">\n          ");
-    int off = 0;
-    for (const OutCell& c : cells) {
-        off += c.nn;
-        std::fprintf(f, "%d ", off);
+
+    // Offsets
+    std::fprintf(f, "        <DataArray type=\"Int32\" Name=\"offsets\" format=\"ascii\">\n          ");
+    for (int c = 0; c < n_cells; ++c) {
+        const auto c_sz = static_cast<std::size_t>(c);
+        std::fprintf(f, "%d ", mp.cell_nodes_offsets[c_sz + 1]);
     }
     std::fprintf(f, "\n        </DataArray>\n");
-    std::fprintf(f,
-                 "        <DataArray type=\"UInt8\" Name=\"types\" "
-                 "format=\"ascii\">\n          ");
-    for (const OutCell& c : cells)
-        std::fprintf(f, "%d ", vtk_cell_type(static_cast<CellType>(c.type)));
-    std::fprintf(f, "\n        </DataArray>\n      </Cells>\n");
 
+    // Types
+    std::fprintf(f, "        <DataArray type=\"UInt8\" Name=\"types\" format=\"ascii\">\n          ");
+    for (int c = 0; c < n_cells; ++c) {
+        const auto c_sz = static_cast<std::size_t>(c);
+        std::fprintf(f, "%u ", to_vtk_cell_type(mp.cell_type[c_sz]));
+    }
+    std::fprintf(f, "\n        </DataArray>\n");
+    std::fprintf(f, "      </Cells>\n");
+
+    // CellData Section
     std::fprintf(f, "      <CellData>\n");
-    std::fprintf(f,
-                 "        <DataArray type=\"Int32\" Name=\"rank\" "
-                 "format=\"ascii\">\n          ");
-    for (int i = 0; i < nc; ++i) std::fprintf(f, "%d ", mp.rank);
+
+    // Field: rank
+    std::fprintf(f, "        <DataArray type=\"Int32\" Name=\"rank\" format=\"ascii\">\n          ");
+    for (int c = 0; c < n_cells; ++c) std::fprintf(f, "%d ", rank);
     std::fprintf(f, "\n        </DataArray>\n");
-    std::fprintf(f,
-                 "        <DataArray type=\"Int32\" Name=\"%s\" "
-                 "format=\"ascii\">\n          ",
-                 data_name);
-    for (const OutCell& c : cells) std::fprintf(f, "%d ", c.data);
-    std::fprintf(f, "\n        </DataArray>\n");
-    if (data2_name != nullptr) {
-        std::fprintf(f,
-                     "        <DataArray type=\"Int32\" Name=\"%s\" "
-                     "format=\"ascii\">\n          ",
-                     data2_name);
-        for (const OutCell& c : cells) std::fprintf(f, "%d ", c.data2);
-        std::fprintf(f, "\n        </DataArray>\n");
+
+    // Field: global_id
+    std::fprintf(f, "        <DataArray type=\"Int64\" Name=\"global_id\" format=\"ascii\">\n          ");
+    for (int c = 0; c < n_cells; ++c) {
+        std::fprintf(f, "%lld ", static_cast<long long>(mp.cell_gid[static_cast<std::size_t>(c)]));
     }
+    std::fprintf(f, "\n        </DataArray>\n");
+
+    // Field: local_id
+    std::fprintf(f, "        <DataArray type=\"Int32\" Name=\"local_id\" format=\"ascii\">\n          ");
+    for (int c = 0; c < n_cells; ++c) std::fprintf(f, "%d ", c);
+    std::fprintf(f, "\n        </DataArray>\n");
+
+    // Field: volume
+    std::fprintf(f, "        <DataArray type=\"Float64\" Name=\"volume\" format=\"ascii\">\n          ");
+    for (int c = 0; c < n_cells; ++c) {
+        std::fprintf(f, "%.10e ", mp.cell_volume[static_cast<std::size_t>(c)]);
+    }
+    std::fprintf(f, "\n        </DataArray>\n");
+
     std::fprintf(f, "      </CellData>\n");
+    std::fprintf(f, "    </Piece>\n");
+    std::fprintf(f, "  </UnstructuredGrid>\n");
+    std::fprintf(f, "</VTKFile>\n");
 
-    std::fprintf(f, "    </Piece>\n  </UnstructuredGrid>\n</VTKFile>\n");
     std::fclose(f);
+}
 
-    // --- .pvtu collection (rank 0) ---
-    MPI_Barrier(MPI_COMM_WORLD);
-    if (rank == 0) {
-        char ppath[512];
-        std::snprintf(ppath, sizeof ppath, "%s/%s.pvtu", outdir.c_str(), stem.c_str());
-        FILE* pf = std::fopen(ppath, "w");
-        if (!pf) {
-            log_warn_rank("could not open %s", ppath);
-            return;
+// =============================================================================
+// 2. Boundary Piece Writer (Boundary Faces Only)
+// =============================================================================
+
+void write_boundary_vtu(
+    const mesh::MeshPart& mp,
+    const std::string& outdir,
+    const std::string& stem) {
+    const int rank = mp.rank;
+    const int n_pts = static_cast<int>(mp.n_nodes);
+
+    // Count boundary faces
+    std::vector<LocalIndex> bface_indices;
+    bface_indices.reserve(static_cast<std::size_t>(mp.n_faces) / 4);
+
+    for (LocalIndex f = 0; f < mp.n_faces; ++f) {
+        if (mp.face_neigh[static_cast<std::size_t>(f)] == kInvalidLocal) {
+            bface_indices.push_back(f);
         }
-        std::fprintf(pf, "<?xml version=\"1.0\"?>\n");
-        std::fprintf(pf,
-                     "<VTKFile type=\"PUnstructuredGrid\" version=\"0.1\" "
-                     "byte_order=\"LittleEndian\">\n");
-        std::fprintf(pf, "  <PUnstructuredGrid GhostLevel=\"0\">\n");
-        std::fprintf(pf, "    <PPointData>\n");
-        std::fprintf(pf, "    </PPointData>\n");
-        std::fprintf(pf, "    <PCellData>\n");
-        std::fprintf(pf, "      <PDataArray type=\"Int32\" Name=\"rank\"/>\n");
-        std::fprintf(pf, "      <PDataArray type=\"Int32\" Name=\"%s\"/>\n", data_name);
-        if (data2_name != nullptr)
-            std::fprintf(pf, "      <PDataArray type=\"Int32\" Name=\"%s\"/>\n", data2_name);
-        std::fprintf(pf, "    </PCellData>\n");
-        std::fprintf(pf, "    <PPoints>\n");
-        std::fprintf(pf,
-                     "      <PDataArray type=\"Float64\" "
-                     "NumberOfComponents=\"3\"/>\n");
-        std::fprintf(pf, "    </PPoints>\n");
-        for (int p = 0; p < nprocs; ++p)
-            std::fprintf(pf, "    <Piece Source=\"%s_%05d.vtu\"/>\n", stem.c_str(), p);
-        std::fprintf(pf, "  </PUnstructuredGrid>\n</VTKFile>\n");
-        std::fclose(pf);
-        log_stat("VTU: %s", ppath);
+    }
+
+    const int n_bfaces = static_cast<int>(bface_indices.size());
+
+    char filepath[512];
+    std::snprintf(filepath, sizeof(filepath), "%s/%s_bnd_%05d.vtu", outdir.c_str(), stem.c_str(), rank);
+
+    FILE* f = std::fopen(filepath, "wb");
+    if (!f) {
+        mpi::log_stat("WARNING: Could not open boundary VTU file: %s", filepath);
+        return;
+    }
+
+    std::vector<char> io_buffer(1024 * 1024);
+    std::setvbuf(f, io_buffer.data(), _IOFBF, io_buffer.size());
+
+    std::fprintf(f, "<?xml version=\"1.0\"?>\n");
+    std::fprintf(f, "<VTKFile type=\"UnstructuredGrid\" version=\"0.1\" byte_order=\"LittleEndian\">\n");
+    std::fprintf(f, "  <UnstructuredGrid>\n");
+    std::fprintf(f, "    <Piece NumberOfPoints=\"%d\" NumberOfCells=\"%d\">\n", n_pts, n_bfaces);
+
+    // Points
+    std::fprintf(f, "      <Points>\n");
+    std::fprintf(f, "        <DataArray type=\"Float64\" NumberOfComponents=\"3\" format=\"ascii\">\n");
+    for (int i = 0; i < n_pts; ++i) {
+        const auto i_sz = static_cast<std::size_t>(i);
+        std::fprintf(f, "          %.16g %.16g %.16g\n", mp.node_x[i_sz], mp.node_y[i_sz], mp.node_z[i_sz]);
+    }
+    std::fprintf(f, "        </DataArray>\n");
+    std::fprintf(f, "      </Points>\n");
+
+    // Cells (Boundary Faces)
+    std::fprintf(f, "      <Cells>\n");
+
+    // Connectivity
+    std::fprintf(f, "        <DataArray type=\"Int32\" Name=\"connectivity\" format=\"ascii\">\n");
+    for (LocalIndex bf : bface_indices) {
+        const auto bf_sz = static_cast<std::size_t>(bf);
+        const LocalIndex start = mp.face_nodes_offsets[bf_sz];
+        const LocalIndex end   = mp.face_nodes_offsets[bf_sz + 1];
+
+        std::fprintf(f, "          ");
+        for (LocalIndex k = start; k < end; ++k) {
+            std::fprintf(f, "%d ", mp.face_nodes[static_cast<std::size_t>(k)]);
+        }
+        std::fprintf(f, "\n");
+    }
+    std::fprintf(f, "        </DataArray>\n");
+
+    // Offsets
+    std::fprintf(f, "        <DataArray type=\"Int32\" Name=\"offsets\" format=\"ascii\">\n          ");
+    int running_off = 0;
+    for (LocalIndex bf : bface_indices) {
+        const auto bf_sz = static_cast<std::size_t>(bf);
+        running_off += static_cast<int>(mp.face_nodes_offsets[bf_sz + 1] - mp.face_nodes_offsets[bf_sz]);
+        std::fprintf(f, "%d ", running_off);
+    }
+    std::fprintf(f, "\n        </DataArray>\n");
+
+    // Types
+    std::fprintf(f, "        <DataArray type=\"UInt8\" Name=\"types\" format=\"ascii\">\n          ");
+    for (LocalIndex bf : bface_indices) {
+        const auto bf_sz = static_cast<std::size_t>(bf);
+        std::fprintf(f, "%u ", to_vtk_cell_type(mp.face_type[bf_sz]));
+    }
+    std::fprintf(f, "\n        </DataArray>\n");
+    std::fprintf(f, "      </Cells>\n");
+
+    // CellData Section
+    std::fprintf(f, "      <CellData>\n");
+
+    // Field: rank
+    std::fprintf(f, "        <DataArray type=\"Int32\" Name=\"rank\" format=\"ascii\">\n          ");
+    for (int i = 0; i < n_bfaces; ++i) std::fprintf(f, "%d ", rank);
+    std::fprintf(f, "\n        </DataArray>\n");
+
+    // Field: patch_id
+    std::fprintf(f, "        <DataArray type=\"Int32\" Name=\"patch_id\" format=\"ascii\">\n          ");
+    for (LocalIndex bf : bface_indices) {
+        std::fprintf(f, "%d ", mp.face_patch[static_cast<std::size_t>(bf)]);
+    }
+    std::fprintf(f, "\n        </DataArray>\n");
+
+    // Field: area
+    std::fprintf(f, "        <DataArray type=\"Float64\" Name=\"area\" format=\"ascii\">\n          ");
+    for (LocalIndex bf : bface_indices) {
+        std::fprintf(f, "%.10e ", mp.face_area[static_cast<std::size_t>(bf)]);
+    }
+    std::fprintf(f, "\n        </DataArray>\n");
+
+    std::fprintf(f, "      </CellData>\n");
+    std::fprintf(f, "    </Piece>\n");
+    std::fprintf(f, "  </UnstructuredGrid>\n");
+    std::fprintf(f, "</VTKFile>\n");
+
+    std::fclose(f);
+}
+
+// =============================================================================
+// 3. Parallel Master PVTU Writers (Rank 0)
+// =============================================================================
+
+void write_pvtu_master(
+    const std::string& outdir,
+    const std::string& filename,
+    const std::string& piece_prefix,
+    int nprocs,
+    bool is_boundary) {
+    char ppath[512];
+    std::snprintf(ppath, sizeof(ppath), "%s/%s.pvtu", outdir.c_str(), filename.c_str());
+
+    FILE* pf = std::fopen(ppath, "wb");
+    if (!pf) {
+        mpi::log_stat("WARNING: Could not open PVTU file: %s", ppath);
+        return;
+    }
+
+    std::fprintf(pf, "<?xml version=\"1.0\"?>\n");
+    std::fprintf(pf, "<VTKFile type=\"PUnstructuredGrid\" version=\"0.1\" byte_order=\"LittleEndian\">\n");
+    std::fprintf(pf, "  <PUnstructuredGrid GhostLevel=\"0\">\n");
+
+    // PCellData Header
+    std::fprintf(pf, "    <PCellData>\n");
+    std::fprintf(pf, "      <PDataArray type=\"Int32\" Name=\"rank\"/>\n");
+    if (!is_boundary) {
+        std::fprintf(pf, "      <PDataArray type=\"Int64\" Name=\"global_id\"/>\n");
+        std::fprintf(pf, "      <PDataArray type=\"Int32\" Name=\"local_id\"/>\n");
+        std::fprintf(pf, "      <PDataArray type=\"Float64\" Name=\"volume\"/>\n");
+    } else {
+        std::fprintf(pf, "      <PDataArray type=\"Int32\" Name=\"patch_id\"/>\n");
+        std::fprintf(pf, "      <PDataArray type=\"Float64\" Name=\"area\"/>\n");
+    }
+    std::fprintf(pf, "    </PCellData>\n");
+
+    // PPoints Header
+    std::fprintf(pf, "    <PPoints>\n");
+    std::fprintf(pf, "      <PDataArray type=\"Float64\" NumberOfComponents=\"3\"/>\n");
+    std::fprintf(pf, "    </PPoints>\n");
+
+    // Piece References
+    for (int p = 0; p < nprocs; ++p) {
+        std::fprintf(pf, "    <Piece Source=\"%s_%05d.vtu\"/>\n", piece_prefix.c_str(), p);
+    }
+
+    std::fprintf(pf, "  </PUnstructuredGrid>\n");
+    std::fprintf(pf, "</VTKFile>\n");
+
+    std::fclose(pf);
+    mpi::log_stat("INFO: Visualisation file written: %s", ppath);
+}
+
+} // anonymous namespace
+
+// =============================================================================
+// Public write_vtu Entry Point
+// =============================================================================
+
+void write_vtu(
+    const mesh::MeshPart& mp,
+    const std::string& outdir,
+    const std::string& stem, 
+    MPI_Comm comm) {
+    const int rank = mp.rank;
+    const int nprocs = mp.nprocs;
+
+    // Create target directory
+    if (rank == 0) {
+        std::error_code ec;
+        std::filesystem::create_directories(outdir, ec);
+    }
+    MPI_Barrier(comm);
+
+    // 1. Parallel write of rank pieces
+    write_volume_vtu(mp, outdir, stem);
+    write_boundary_vtu(mp, outdir, stem);
+
+    MPI_Barrier(comm);
+
+    // 2. Rank 0 writes master .pvtu collections
+    if (rank == 0) {
+        write_pvtu_master(outdir, stem, stem, nprocs, false);
+        write_pvtu_master(outdir, stem + "_bnd", stem + "_bnd", nprocs, true);
     }
 }
 
-}  // namespace
-
-void write_vtu(const MeshPart& mp, const std::string& outdir, const std::string& stem) {
-    std::error_code ec;
-    std::filesystem::create_directories(outdir, ec);  // create the directory if needed
-
-    // Two pieces per rank, each with strictly valid field values:
-    //   <stem>_XXXXX.vtu     — owned volume cells only (CellData: rank,
-    //                          global_id, local_id). Ghost cells are NOT
-    //                          exported: they duplicate neighbouring blocks
-    //                          and were already verified visually.
-    //   <stem>_bnd_XXXXX.vtu — boundary faces only (CellData: rank, patch).
-    std::vector<OutCell> volume;
-    volume.reserve(mp.n_own);
-    for (int i = 0; i < mp.n_own; ++i) {
-        OutCell c{};
-        c.type = mp.cell_type[i];
-        c.nn = kNodesPerType[mp.cell_type[i]];
-        for (int k = 0; k < c.nn; ++k) c.nodes[k] = mp.cell_nodes[i * 8 + k];
-        c.data = mp.cell_gid[i];
-        c.data2 = i;  // rank-local index (SFC-ordered)
-        volume.push_back(c);
-    }
-    std::vector<OutCell> boundary;
-    boundary.reserve(mp.n_faces);
-    for (int i = 0; i < mp.n_faces; ++i) {
-        if (mp.face_neigh[i] >= 0) continue;  // boundary faces only
-        OutCell c{};
-        c.type = mp.face_type[i];
-        c.nn = (c.type == static_cast<uint8_t>(CellType::TRI)) ? 3 : 4;
-        for (int k = 0; k < c.nn; ++k) c.nodes[k] = mp.face_nodes[i * 4 + k];
-        c.data = mp.face_patch[i];
-        boundary.push_back(c);
-    }
-
-    write_piece(mp, outdir, stem, volume, "global_id", "local_id");
-    write_piece(mp, outdir, stem + "_bnd", boundary, "patch", nullptr);
-}
+} // namespace cfd::io::vtk

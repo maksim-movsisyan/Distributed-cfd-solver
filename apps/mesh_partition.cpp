@@ -388,17 +388,22 @@ int main(int argc, char** argv) {
     cfd::mesh::compute_mesh_geometry(mp);
 
 
-    // Local cell reordering for CPU cache locality and matrix bandwidth minimization.
+    // Local cell and face reordering for CPU cache locality, branch elimination, and matrix bandwidth.
     //
     // Optimizes memory access patterns for owned cells [0, n_own):
-    //  - HILBERT_SFC: 3D Space-Filling Curve (optimal for Explicit RK / DG solvers);
+    //  - HILBERT_SFC: 3D Space-Filling Curve (optimal L1/L2 cache spatial locality for Explicit solvers);
     //  - RCM: Reverse Cuthill-McKee (minimizes sparse matrix bandwidth for Implicit solvers).
     //
-    // Guarantees:
-    //  - Preserves ghost layer contiguous layouts intact [n_own, n_cells);
-    //  - Automatically updates `send_owned_local` communication maps;
-    //  - Re-sorts local faces by (owner, neigh) to eliminate pointer chasing in flux loops;
-    //  - Reconstructs flat CSR BC patch tables.
+    // Guarantees & Invariants:
+    //  - Preserves ghost layer contiguous layout intact [n_own, n_cells);
+    //  - Automatically updates `send_owned_local` communication indices;
+    //  - Partitions and sorts the face array into two contiguous sections:
+    //      1. Interior faces [0, n_inner_faces): sorted monotonically by (owner, neigh)
+    //         for branchless SIMD/AVX flux loops and linear prefetching;
+    //      2. Boundary faces [n_inner_faces, n_faces): grouped contiguously by `patch_id`,
+    //         then sorted by `owner` cell index for vectorized BC evaluations;
+    //  - Reconstructs flat CSR boundary patch tables (`patch_face_offsets`, `patch_faces`);
+    //  - Sets `mp.n_inner_faces` to the exact count of interior faces.
     cfd::mesh::reorder_local_mesh(mp, reorder_m);
 
 

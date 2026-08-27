@@ -432,6 +432,17 @@ void import_mesh_hdf5(mesh::MeshPart& mp, const std::string& filepath, MPI_Comm 
         read_dataset_1d(g_patch, "patch_faces", patch_faces_offset_pos, my_patch_faces_cnt, mp.patch_faces.data(), dxpl);
     }
 
+    // 10. Update last field - n_inner faces
+    LocalIndex n_inner = 0;
+    for (LocalIndex f = 0; f < mp.n_faces; ++f) {
+        if (mp.face_neigh[static_cast<std::size_t>(f)] >= 0) {
+            ++n_inner;
+        } else {
+            break;
+        }
+    }
+    mp.n_inner_faces = n_inner;
+
     if (rank == 0) {
         mpi::log_stat("INFO: Mesh successfully loaded from Parallel HDF5: %s", filepath.c_str());
     }

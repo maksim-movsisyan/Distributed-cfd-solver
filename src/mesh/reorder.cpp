@@ -421,10 +421,25 @@ void apply_cell_permutation(MeshPart& mp, const std::vector<LocalIndex>& new2old
 
     std::vector<LocalIndex> face_perm(static_cast<std::size_t>(mp.n_faces));
     for (LocalIndex f = 0; f < mp.n_faces; ++f) face_perm[static_cast<std::size_t>(f)] = f;
-
+    
     std::sort(face_perm.begin(), face_perm.end(), [&](LocalIndex a, LocalIndex b) {
         const std::size_t a_sz = static_cast<std::size_t>(a);
         const std::size_t b_sz = static_cast<std::size_t>(b);
+
+        const bool a_is_bnd = (mp.face_neigh[a_sz] < 0);
+        const bool b_is_bnd = (mp.face_neigh[b_sz] < 0);
+
+        if (a_is_bnd != b_is_bnd) {
+            return !a_is_bnd;
+        }
+
+        if (a_is_bnd) {
+            if (mp.face_patch[a_sz] != mp.face_patch[b_sz]) {
+                return mp.face_patch[a_sz] < mp.face_patch[b_sz];
+            }
+            return mp.face_owner[a_sz] < mp.face_owner[b_sz];
+        }
+
         if (mp.face_owner[a_sz] != mp.face_owner[b_sz]) {
             return mp.face_owner[a_sz] < mp.face_owner[b_sz];
         }
@@ -524,13 +539,20 @@ void apply_cell_permutation(MeshPart& mp, const std::vector<LocalIndex>& new2old
             }
         }
     }
+
+    LocalIndex n_inner_faces = 0;
+    for (LocalIndex f = 0; f < mp.n_faces; ++f) {
+        if (mp.face_neigh[static_cast<std::size_t>(f)] >= 0) ++n_inner_faces;
+        else break;
+    }
+    mp.n_inner_faces = n_inner_faces;
 }
 
 } // anonymous namespace
 
 
 void reorder_local_mesh(MeshPart& mp, ReorderMethod method) {
-    if (method == ReorderMethod::NONE || mp.n_own <= 1) {
+    if (mp.n_own <= 1) {
         return;
     }
 
@@ -541,9 +563,16 @@ void reorder_local_mesh(MeshPart& mp, ReorderMethod method) {
         new2old = compute_hilbert_order(mp);
     }
 
-    if (!new2old.empty()) {
-        apply_cell_permutation(mp, new2old);
+    if (new2old.empty()) {
+        const LocalIndex n_own = mp.n_own;
+        const std::size_t n_own_sz = static_cast<std::size_t>(n_own);
+        new2old.resize(n_own_sz);
+        for (std::size_t i = 0; i < n_own_sz; ++i) {
+            new2old[i] = static_cast<LocalIndex>(i); 
+        }
     }
+
+    apply_cell_permutation(mp, new2old);
 }
 
 } // namespace cfd::mesh

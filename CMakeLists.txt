@@ -258,6 +258,42 @@ target_link_libraries(
         cfd_project_warnings
 )
 
+    #===============
+    #=== SOLVER ====
+    #===============
+add_library(
+    cfd_solver
+    STATIC
+        src/solver/config.cpp
+        src/solver/halo.cpp
+        src/solver/solver.cpp
+        src/solver/bc/bc_manager.cpp
+)
+
+target_include_directories(
+    cfd_solver
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+)
+
+target_include_directories(
+    cfd_solver
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/external/tomlplusplus/include
+)
+
+target_link_libraries(
+    cfd_solver
+    PUBLIC
+        cfd_project_options
+        cfd_mpi
+        cfd_mesh
+        cfd_solver_mesh_io
+    PRIVATE
+        cfd_project_warnings
+)
+
 #==================================================================
 #==== EXECUTABLES =================================================
 #==================================================================
@@ -290,9 +326,26 @@ target_link_libraries(
     cfd_project_warnings
     cfd_project_options
 
-    cfd_mpi      
-    cfd_mesh      
-    cfd_solver_mesh_io 
+    cfd_mpi
+    cfd_mesh
+    cfd_solver_mesh_io
+)
+
+    #=============================
+    #=== FLOW SOLVER =============
+    #=============================
+add_executable(solver apps/solver.cpp)
+
+target_link_libraries(
+    solver
+    PRIVATE
+    cfd_project_warnings
+    cfd_project_options
+
+    cfd_mpi
+    cfd_mesh
+    cfd_solver_mesh_io
+    cfd_solver
 )
 
 #==================================================================

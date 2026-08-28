@@ -148,4 +148,29 @@ ls $HOME/local/cgns/lib                     # libcgns.a is present
 ls $HOME/local/kaminpar/lib                 # KaMinPar libraries/binaries are present
 ```
 
+---
+
+## Solver Dependencies
+
+### toml++ (TOML parser for `solver.toml` / `bc.toml`)
+
+The solver configuration files are TOML, parsed with
+**[toml++](https://github.com/marzer/tomlplusplus)** (MIT license). The
+amalgamated single header is vendored into the repository at
+`external/tomlplusplus/include/toml++/toml.hpp`, so no download is needed for
+a normal build — CMake picks it up via a private include path of the
+`cfd_solver` target.
+
+To (re-)download or upgrade the vendored copy, run from the repository root:
+
+```bash
+mkdir -p external/tomlplusplus/include/toml++
+curl -L -o external/tomlplusplus/include/toml++/toml.hpp \
+    https://raw.githubusercontent.com/marzer/tomlplusplus/v3.4.0/toml.hpp
+```
+
+- Version currently vendored: **v3.4.0**
+- Size: ~486 KB single header (`toml.hpp`)
+- No build step, no additional dependencies, C++17 or newer.
 </details>
+

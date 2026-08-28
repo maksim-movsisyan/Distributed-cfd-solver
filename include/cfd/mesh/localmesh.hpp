@@ -67,7 +67,7 @@ struct MeshPart {
     std::vector<double> face_centroid_x;
     std::vector<double> face_centroid_y;
     std::vector<double> face_centroid_z;
-    std::vector<double> face_normal_x;           // Outward normal (magnitude = area or normalized, specify later)
+    std::vector<double> face_normal_x;           
     std::vector<double> face_normal_y;
     std::vector<double> face_normal_z;
     std::vector<double> face_area;

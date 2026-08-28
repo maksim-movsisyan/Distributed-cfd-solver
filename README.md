@@ -96,6 +96,41 @@ mpirun -np 4 build/release/solver_mesh_check out/mesh.h5 \
   - `volume` — Cell finite-volume distribution.
 - Open `out/vtu/mesh_bnd.pvtu` to inspect boundary patches. Color by `patch_id` to verify boundary condition assignments.
 
+### 3. Run the Flow Solver (Compressible Euler, Phase 0)
+```bash
+mpirun -np 4 build/release/solver out/mesh.h5 \
+    examples/wedge/solver.toml \
+    examples/wedge/bc.toml \
+    --verbose
+```
+The mesh container is rank-locked: it must be run with exactly the same
+`-np` as `mesh_partition`. `solver.toml` selects the numerical scheme
+(HLLC flux, first-order reconstruction, Forward-Euler / SSP-RK3 with local
+time stepping), `bc.toml` assigns one boundary condition to every mesh patch
+(generated as a template by `mesh_partition --bc`, then edited). Solution
+dumps (`rho, u, v, w, pressure, mach` as CellData) are written as
+`<stem>.pvtu` collections into the configured output directory.
+
+---
+
+## Solver Architecture (Phase 0)
+
+`cfd_solver` — fields (cache-line-aligned SoA), one-hop field halo exchange,
+perfect-gas kernels, the HLLC flux policy, ghost-state boundary conditions
+(SLIP_WALL / SYMMETRY / SUPERSONIC_INLET / SUPERSONIC_OUTLET / FARFIELD),
+the residual kernel `R(U)` and the explicit time integrators.
+
+Extension seams (Open-Closed):
+- **New numerical flux** — implement the `face_flux` policy contract
+  (see `flux/hllc.hpp`), add one case to the factory switch in
+  `run_solver`. The flux inlines into both face sweeps; no other file
+  changes.
+- **New boundary condition** — derive from `BoundaryCondition`
+  (`bc.hpp`), add one parser entry. Dispatch is one virtual call per patch
+  per residual evaluation; per-face loops are inlined and branch-free.
+- Boundary faces reuse the inner-face flux kernel unchanged via one ghost
+  cell per boundary face, so both hot loops contain no face-kind branching.
+
 ---
 
 ## Output File Format (v2, Topology-Aware Flat Parallel Layout)

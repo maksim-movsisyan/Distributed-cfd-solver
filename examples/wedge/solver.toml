@@ -1,0 +1,30 @@
+# Supersonic wedge (M = 2), phase-0 validation case.
+# Initial state = inlet freestream: p = 101325 Pa, T = 300 K, M = 2 along x.
+#   rho  = p / (R T)          = 1.1768292...  kg/m^3
+#   a    = sqrt(gamma R T)    = 347.2216...   m/s
+#   | u | = M a               = 694.4432...   m/s
+
+[flow]
+eos = "IDEAL_GAS"
+gamma = 1.4
+gas_constant = 287.052874
+
+[initial]
+rho = 1.1768
+pressure = 101325.0
+velocity = [1041.0, 0.0, 0.0]
+
+[numerics]
+flux = "HLLC"
+reconstruction = "FIRST_ORDER"
+
+[time]
+scheme = "SSP_RK3"
+cfl = 0.4
+max_iterations = 10000
+residual_tolerance = 1.0e-10
+
+[output]
+directory = "out/wedge"
+field_interval = 1000
+residual_interval = 250

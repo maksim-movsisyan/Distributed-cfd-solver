@@ -29,35 +29,10 @@ constexpr LocalIndex kInvalidLocal = static_cast<LocalIndex>(-1);
     }
 }
 
-// =============================================================================
-// 1. Volume Piece Writer (Owned Cells [0, n_own))
-// =============================================================================
-
-void write_volume_vtu(
-    const mesh::MeshPart& mp,
-    const std::string& outdir,
-    const std::string& stem) {
-    const int rank = mp.rank;
+// Shared <Points> + <Cells> sections of a volume piece (owned cells).
+void write_points_and_cells(FILE* f, const mesh::MeshPart& mp) {
     const int n_cells = static_cast<int>(mp.n_own);
     const int n_pts   = static_cast<int>(mp.n_nodes);
-
-    char filepath[512];
-    std::snprintf(filepath, sizeof(filepath), "%s/%s_%05d.vtu", outdir.c_str(), stem.c_str(), rank);
-
-    FILE* f = std::fopen(filepath, "wb");
-    if (!f) {
-        mpi::log_stat("WARNING: Could not open VTU file: %s", filepath);
-        return;
-    }
-
-    // 1MB I/O buffer to minimize POSIX write syscalls
-    std::vector<char> io_buffer(1024 * 1024);
-    std::setvbuf(f, io_buffer.data(), _IOFBF, io_buffer.size());
-
-    std::fprintf(f, "<?xml version=\"1.0\"?>\n");
-    std::fprintf(f, "<VTKFile type=\"UnstructuredGrid\" version=\"0.1\" byte_order=\"LittleEndian\">\n");
-    std::fprintf(f, "  <UnstructuredGrid>\n");
-    std::fprintf(f, "    <Piece NumberOfPoints=\"%d\" NumberOfCells=\"%d\">\n", n_pts, n_cells);
 
     // Points Coordinates (SoA -> 3D components)
     std::fprintf(f, "      <Points>\n");
@@ -103,6 +78,39 @@ void write_volume_vtu(
     }
     std::fprintf(f, "\n        </DataArray>\n");
     std::fprintf(f, "      </Cells>\n");
+}
+
+// =============================================================================
+// 1. Volume Piece Writer (Owned Cells [0, n_own))
+// =============================================================================
+
+void write_volume_vtu(
+    const mesh::MeshPart& mp,
+    const std::string& outdir,
+    const std::string& stem) {
+    const int rank = mp.rank;
+    const int n_cells = static_cast<int>(mp.n_own);
+    const int n_pts   = static_cast<int>(mp.n_nodes);
+
+    char filepath[512];
+    std::snprintf(filepath, sizeof(filepath), "%s/%s_%05d.vtu", outdir.c_str(), stem.c_str(), rank);
+
+    FILE* f = std::fopen(filepath, "wb");
+    if (!f) {
+        mpi::log_stat("WARNING: Could not open VTU file: %s", filepath);
+        return;
+    }
+
+    // 1MB I/O buffer to minimize POSIX write syscalls
+    std::vector<char> io_buffer(1024 * 1024);
+    std::setvbuf(f, io_buffer.data(), _IOFBF, io_buffer.size());
+
+    std::fprintf(f, "<?xml version=\"1.0\"?>\n");
+    std::fprintf(f, "<VTKFile type=\"UnstructuredGrid\" version=\"0.1\" byte_order=\"LittleEndian\">\n");
+    std::fprintf(f, "  <UnstructuredGrid>\n");
+    std::fprintf(f, "    <Piece NumberOfPoints=\"%d\" NumberOfCells=\"%d\">\n", n_pts, n_cells);
+
+    write_points_and_cells(f, mp);
 
     // CellData Section
     std::fprintf(f, "      <CellData>\n");
@@ -309,6 +317,100 @@ void write_pvtu_master(
     mpi::log_stat("INFO: Visualisation file written: %s", ppath);
 }
 
+// Solution volume piece: geometry + rank + the requested solution fields.
+void write_solution_vtu_piece(
+    const mesh::MeshPart& mp,
+    const SolutionField* fields,
+    int nfields,
+    const std::string& outdir,
+    const std::string& stem) {
+    const int rank = mp.rank;
+    const int n_cells = static_cast<int>(mp.n_own);
+    const int n_pts   = static_cast<int>(mp.n_nodes);
+
+    char filepath[512];
+    std::snprintf(filepath, sizeof(filepath), "%s/%s_%05d.vtu", outdir.c_str(), stem.c_str(), rank);
+
+    FILE* f = std::fopen(filepath, "wb");
+    if (!f) {
+        mpi::log_stat("WARNING: Could not open VTU file: %s", filepath);
+        return;
+    }
+
+    std::vector<char> io_buffer(1024 * 1024);
+    std::setvbuf(f, io_buffer.data(), _IOFBF, io_buffer.size());
+
+    std::fprintf(f, "<?xml version=\"1.0\"?>\n");
+    std::fprintf(f, "<VTKFile type=\"UnstructuredGrid\" version=\"0.1\" byte_order=\"LittleEndian\">\n");
+    std::fprintf(f, "  <UnstructuredGrid>\n");
+    std::fprintf(f, "    <Piece NumberOfPoints=\"%d\" NumberOfCells=\"%d\">\n", n_pts, n_cells);
+
+    write_points_and_cells(f, mp);
+
+    std::fprintf(f, "      <CellData>\n");
+
+    std::fprintf(f, "        <DataArray type=\"Int32\" Name=\"rank\" format=\"ascii\">\n          ");
+    for (int c = 0; c < n_cells; ++c) std::fprintf(f, "%d ", rank);
+    std::fprintf(f, "\n        </DataArray>\n");
+
+    for (int i = 0; i < nfields; ++i) {
+        std::fprintf(f, "        <DataArray type=\"Float64\" Name=\"%s\" format=\"ascii\">\n          ",
+                     fields[i].name);
+        for (int c = 0; c < n_cells; ++c) {
+            std::fprintf(f, "%.10e ", fields[i].values[static_cast<std::size_t>(c)]);
+        }
+        std::fprintf(f, "\n        </DataArray>\n");
+    }
+
+    std::fprintf(f, "      </CellData>\n");
+    std::fprintf(f, "    </Piece>\n");
+    std::fprintf(f, "  </UnstructuredGrid>\n");
+    std::fprintf(f, "</VTKFile>\n");
+
+    std::fclose(f);
+}
+
+void write_solution_pvtu_master(
+    const std::string& outdir,
+    const std::string& stem,
+    int nprocs,
+    const SolutionField* fields,
+    int nfields) {
+    char ppath[512];
+    std::snprintf(ppath, sizeof(ppath), "%s/%s.pvtu", outdir.c_str(), stem.c_str());
+
+    FILE* pf = std::fopen(ppath, "wb");
+    if (!pf) {
+        mpi::log_stat("WARNING: Could not open PVTU file: %s", ppath);
+        return;
+    }
+
+    std::fprintf(pf, "<?xml version=\"1.0\"?>\n");
+    std::fprintf(pf, "<VTKFile type=\"PUnstructuredGrid\" version=\"0.1\" byte_order=\"LittleEndian\">\n");
+    std::fprintf(pf, "  <PUnstructuredGrid GhostLevel=\"0\">\n");
+
+    std::fprintf(pf, "    <PCellData>\n");
+    std::fprintf(pf, "      <PDataArray type=\"Int32\" Name=\"rank\"/>\n");
+    for (int i = 0; i < nfields; ++i) {
+        std::fprintf(pf, "      <PDataArray type=\"Float64\" Name=\"%s\"/>\n", fields[i].name);
+    }
+    std::fprintf(pf, "    </PCellData>\n");
+
+    std::fprintf(pf, "    <PPoints>\n");
+    std::fprintf(pf, "      <PDataArray type=\"Float64\" NumberOfComponents=\"3\"/>\n");
+    std::fprintf(pf, "    </PPoints>\n");
+
+    for (int p = 0; p < nprocs; ++p) {
+        std::fprintf(pf, "    <Piece Source=\"%s_%05d.vtu\"/>\n", stem.c_str(), p);
+    }
+
+    std::fprintf(pf, "  </PUnstructuredGrid>\n");
+    std::fprintf(pf, "</VTKFile>\n");
+
+    std::fclose(pf);
+    mpi::log_stat("INFO: Solution file written: %s", ppath);
+}
+
 } // anonymous namespace
 
 // =============================================================================
@@ -340,6 +442,34 @@ void write_vtu(
     if (rank == 0) {
         write_pvtu_master(outdir, stem, stem, nprocs, false);
         write_pvtu_master(outdir, stem + "_bnd", stem + "_bnd", nprocs, true);
+    }
+}
+
+// =============================================================================
+// Public write_solution_vtu Entry Point
+// =============================================================================
+
+void write_solution_vtu(
+    const mesh::MeshPart& mp,
+    const SolutionField* fields,
+    int nfields,
+    const std::string& outdir,
+    const std::string& stem,
+    MPI_Comm comm) {
+    const int rank = mp.rank;
+
+    if (rank == 0) {
+        std::error_code ec;
+        std::filesystem::create_directories(outdir, ec);
+    }
+    MPI_Barrier(comm);
+
+    write_solution_vtu_piece(mp, fields, nfields, outdir, stem);
+
+    MPI_Barrier(comm);
+
+    if (rank == 0) {
+        write_solution_pvtu_master(outdir, stem, mp.nprocs, fields, nfields);
     }
 }
 

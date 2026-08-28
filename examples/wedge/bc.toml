@@ -1,0 +1,23 @@
+# Supersonic wedge boundary conditions.
+# Patch ids refer to the mesh container (out/mesh.h5):
+#   0 = WALLS  (wedge surface)   1 = OUTLET
+#   2 = SYMM   (side planes)     3 = INLET
+
+[[boundary_condition]]
+patch_id = 0
+type = "SLIP_WALL"
+
+[[boundary_condition]]
+patch_id = 1
+type = "SUPERSONIC_OUTLET"
+
+[[boundary_condition]]
+patch_id = 2
+type = "SYMMETRY"
+
+[[boundary_condition]]
+patch_id = 3
+type = "SUPERSONIC_INLET"
+p = 101325.0
+t = 300.0
+velocity = [1041.0, 0.0, 0.0]

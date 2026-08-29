@@ -28,6 +28,7 @@ struct BCDescriptor {
     // pressure and temperature
     double p{101325.0};
     double t{288.15};
+    double tmp_grad{0.0}; ///< Normal temperature gradient dT/dn [K/m]
 
     // velocity vector
     std::array<double, 3> velocity{0.0, 0.0, 0.0};
@@ -37,6 +38,7 @@ struct BCDescriptor {
     double alpha_deg{0.0};
     double beta_deg{0.0};
     std::array<double, 3> direction{1.0, 0.0, 0.0};
+    
 };
 
 struct BoundaryConfig {

@@ -22,7 +22,7 @@ venkat_k = 0.5
 [time]
 scheme = "SSP_RK3"
 cfl = 0.4
-max_iterations = 10000
+max_iterations = 4000
 residual_tolerance = 1.0e-10
 
 [output]

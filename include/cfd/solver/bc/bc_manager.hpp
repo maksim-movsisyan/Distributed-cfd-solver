@@ -12,11 +12,15 @@
 #include "cfd/mesh/localmesh.hpp"
 #include "cfd/mpi/log.hpp"
 #include "cfd/solver/bc/bc.hpp"
-#include "cfd/solver/bc/bc_farfield.hpp"
-#include "cfd/solver/bc/bc_slip_wall.hpp"
-#include "cfd/solver/bc/bc_supersonic_inlet.hpp"
-#include "cfd/solver/bc/bc_supersonic_outlet.hpp"
-#include "cfd/solver/bc/bc_symmetry.hpp"
+#include "cfd/solver/bc/farfield.hpp"
+#include "cfd/solver/bc/slip_wall.hpp"
+#include "cfd/solver/bc/supersonic_inlet.hpp"
+#include "cfd/solver/bc/supersonic_outlet.hpp"
+#include "cfd/solver/bc/symmetry.hpp"
+#include "cfd/solver/bc/noslip_wall.hpp"
+#include "cfd/solver/bc/noslip_wall_heat_flux.hpp"
+#include "cfd/solver/bc/subsonic_inlet.hpp"
+#include "cfd/solver/bc/subsonic_outlet.hpp"
 #include "cfd/solver/config.hpp"
 #include "cfd/solver/eos/eos_concept.hpp"
 #include "cfd/solver/fields/fields_view.hpp"
@@ -115,47 +119,47 @@ private:
     void register_all() {
         // ==== Supersonic Inlet ====
         m_registry[BCType::SupersonicInlet] =
-        [](const std::string& z, const LocalIndex b, const LocalIndex e,
-           const BCDescriptor& desc, const EOS& eos) -> BCPtr {
-            SupersonicInletParams par;
+            [](const std::string& z, const LocalIndex b, const LocalIndex e,
+            const BCDescriptor& desc, const EOS& eos) -> BCPtr {
+                SupersonicInletParams par;
 
-            switch (desc.inflow_mode) {
-                case InflowMode::Velocity:
-                    par = SupersonicInletParams::from_velocities(
-                        desc.p,
-                        desc.velocity[0],
-                        desc.velocity[1],
-                        desc.velocity[2],
-                        desc.t
-                    );
-                    break;
+                switch (desc.inflow_mode) {
+                    case InflowMode::Velocity:
+                        par = SupersonicInletParams::from_velocities(
+                            desc.p,
+                            desc.velocity[0],
+                            desc.velocity[1],
+                            desc.velocity[2],
+                            desc.t
+                        );
+                        break;
 
-                case InflowMode::MachAngles:
-                    par = SupersonicInletParams::from_mach_angles(
-                        eos,
-                        desc.p,
-                        desc.t,
-                        desc.mach,
-                        desc.alpha_deg,
-                        desc.beta_deg
-                    );
-                    break;
+                    case InflowMode::MachAngles:
+                        par = SupersonicInletParams::from_mach_angles(
+                            eos,
+                            desc.p,
+                            desc.t,
+                            desc.mach,
+                            desc.alpha_deg,
+                            desc.beta_deg
+                        );
+                        break;
 
-                case InflowMode::MachDirection:
-                    par = SupersonicInletParams::from_mach_direction(
-                        eos,
-                        desc.p,
-                        desc.t,
-                        desc.mach,
-                        desc.direction[0],
-                        desc.direction[1],
-                        desc.direction[2]
-                    );
-                    break;
-            }
+                    case InflowMode::MachDirection:
+                        par = SupersonicInletParams::from_mach_direction(
+                            eos,
+                            desc.p,
+                            desc.t,
+                            desc.mach,
+                            desc.direction[0],
+                            desc.direction[1],
+                            desc.direction[2]
+                        );
+                        break;
+                }
 
-            return std::make_unique<SupersonicInletBC<EOS>>(z, b, e, par);
-        };
+                return std::make_unique<SupersonicInletBC<EOS>>(z, b, e, par);
+            };
 
         // ==== Supersonic Outlet ====
         m_registry[BCType::SupersonicOutlet] =
@@ -180,48 +184,123 @@ private:
 
         // ==== Farfield (Riemann Invariants) ====
         m_registry[BCType::Farfield] =
-        [](const std::string& z, const LocalIndex b, const LocalIndex e,
-           const BCDescriptor& desc, const EOS& eos) -> BCPtr {
-            FarfieldParams par;
+            [](const std::string& z, const LocalIndex b, const LocalIndex e,
+            const BCDescriptor& desc, const EOS& eos) -> BCPtr {
+                FarfieldParams par;
 
-            switch (desc.inflow_mode) {
-                case InflowMode::Velocity:
-                    par = FarfieldParams::from_velocities(
-                        eos,
-                        desc.p,
-                        desc.velocity[0],
-                        desc.velocity[1],
-                        desc.velocity[2],
-                        desc.t
-                    );
-                    break;
+                switch (desc.inflow_mode) {
+                    case InflowMode::Velocity:
+                        par = FarfieldParams::from_velocities(
+                            eos,
+                            desc.p,
+                            desc.velocity[0],
+                            desc.velocity[1],
+                            desc.velocity[2],
+                            desc.t
+                        );
+                        break;
 
-                case InflowMode::MachAngles:
-                    par = FarfieldParams::from_mach_angles(
-                        eos,
-                        desc.p,
-                        desc.t,
-                        desc.mach,
-                        desc.alpha_deg,
-                        desc.beta_deg
-                    );
-                    break;
+                    case InflowMode::MachAngles:
+                        par = FarfieldParams::from_mach_angles(
+                            eos,
+                            desc.p,
+                            desc.t,
+                            desc.mach,
+                            desc.alpha_deg,
+                            desc.beta_deg
+                        );
+                        break;
 
-                case InflowMode::MachDirection:
-                    par = FarfieldParams::from_mach_direction(
-                        eos,
-                        desc.p,
-                        desc.t,
-                        desc.mach,
-                        desc.direction[0],
-                        desc.direction[1],
-                        desc.direction[2]
-                    );
-                    break;
-            }
+                    case InflowMode::MachDirection:
+                        par = FarfieldParams::from_mach_direction(
+                            eos,
+                            desc.p,
+                            desc.t,
+                            desc.mach,
+                            desc.direction[0],
+                            desc.direction[1],
+                            desc.direction[2]
+                        );
+                        break;
+                }
 
-            return std::make_unique<FarfieldBC<EOS>>(z, b, e, par);
-        };
+                return std::make_unique<FarfieldBC<EOS>>(z, b, e, par);
+            };
+
+        // ==== Noslip wall (isothermal) ====
+        m_registry[BCType::NoSlipWall] =
+            [](const std::string& z, const LocalIndex b, const LocalIndex e,
+            const BCDescriptor& desc, const EOS& /*eos*/) -> BCPtr {
+                const auto par = NoSlipWallParams::moving_isothermal(
+                    desc.velocity[0],
+                    desc.velocity[1],
+                    desc.velocity[2],
+                    desc.t
+                );
+                return std::make_unique<NoSlipWallBC<EOS>>(z, b, e, par);
+            };
+
+        // ==== Noslip wall (fixed temperature gradient) ====
+        m_registry[BCType::NoSlipWallHeatFlux] =
+            [](const std::string& z, const LocalIndex b, const LocalIndex e,
+            const BCDescriptor& desc, const EOS& /*eos*/) -> BCPtr {
+                const auto par = NoSlipWallHeatFluxParams::moving_gradient(
+                    desc.velocity[0],
+                    desc.velocity[1],
+                    desc.velocity[2],
+                    desc.tmp_grad
+                );
+                return std::make_unique<NoSlipWallHeatFluxBC<EOS>>(z, b, e, par);
+            };
+        
+        // ==== Subsonic inlet ====
+        m_registry[BCType::SubsonicInlet] =
+            [](const std::string& z, const LocalIndex b, const LocalIndex e,
+            const BCDescriptor& desc, const EOS& eos) -> BCPtr {
+                SubsonicInletParams par;
+
+                switch (desc.inflow_mode) {
+                    case InflowMode::Velocity:
+                        par = SubsonicInletParams::from_velocities(
+                            desc.velocity[0],
+                            desc.velocity[1],
+                            desc.velocity[2],
+                            desc.t
+                        );
+                        break;
+
+                    case InflowMode::MachAngles:
+                        par = SubsonicInletParams::from_mach_angles(
+                            eos,
+                            desc.t,
+                            desc.mach,
+                            desc.alpha_deg,
+                            desc.beta_deg
+                        );
+                        break;
+
+                    case InflowMode::MachDirection:
+                        par = SubsonicInletParams::from_mach_direction(
+                            eos,
+                            desc.t,
+                            desc.mach,
+                            desc.direction[0],
+                            desc.direction[1],
+                            desc.direction[2]
+                        );
+                        break;
+                }
+
+                return std::make_unique<SubsonicInletBC<EOS>>(z, b, e, par);
+            };
+
+        // ==== Subsonic outlet ====
+        m_registry[BCType::SubsonicOutlet] =
+            [](const std::string& z, const LocalIndex b, const LocalIndex e,
+            const BCDescriptor& desc, const EOS& /*eos*/) -> BCPtr {
+                const auto par = SubsonicOutletParams::from_pressure(desc.p);
+                return std::make_unique<SubsonicOutletBC<EOS>>(z, b, e, par);
+            };
     }
 
     /**

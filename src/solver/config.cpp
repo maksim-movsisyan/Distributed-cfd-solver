@@ -469,6 +469,11 @@ BoundaryConfig parse_boundary_config(const std::string& path,
             d.type = bc::BCType::Farfield;
             parse_inflow_descriptor(*t, d, ctx, comm);
 
+            if (d.inflow_mode == bc::InflowMode::MachAngles || d.inflow_mode == bc::InflowMode::MachDirection) {
+                mpi::log_stat("WARNING: %s: Mach-based inflow mode selected. "
+                                "Note: velocity magnitude is evaluated assuming Ideal Gas EOS kinematics.",
+                                ctx.c_str());
+            }
         } else if (type == "SUPERSONIC_OUTLET") {
             d.type = bc::BCType::SupersonicOutlet;
             check_allowed_keys(*t, meta, ctx, comm);
@@ -480,10 +485,76 @@ BoundaryConfig parse_boundary_config(const std::string& path,
         } else if (type == "SYMMETRY") {
             d.type = bc::BCType::Symmetry;
             check_allowed_keys(*t, meta, ctx, comm);
+        } else if (type == "NO_SLIP_WALL") {
+            d.type = bc::BCType::NoSlipWall;
+            check_allowed_keys(*t, {"patch_id", "type", "name", "cgns_type", "global_face_count",
+                                    "t", "t_wall", "velocity"}, ctx, comm);
 
+            if (t->contains("t_wall")) {
+                d.t = req_number(*t, "t_wall", ctx, comm);
+            } else if (t->contains("t")) {
+                d.t = req_number(*t, "t", ctx, comm);
+            } else {
+                d.t = 288.15; // default isothermal wall temperature
+            }
+            check_positive(d.t, "t", ctx, comm);
+
+            if (t->contains("velocity")) {
+                d.velocity = req_vec3(*t, "velocity", ctx, comm);
+            } else {
+                d.velocity = {0.0, 0.0, 0.0}; // default stationary wall
+            }
+        } else if (type == "NO_SLIP_WALL_HEAT_FLUX" || type == "NO_SLIP_WALL_ADIABATIC") {
+            d.type = bc::BCType::NoSlipWallHeatFlux;
+            check_allowed_keys(*t, {"patch_id", "type", "name", "cgns_type", "global_face_count",
+                                    "tmp_grad", "heat_flux_grad", "velocity"},
+                            ctx, comm);
+
+            if (t->contains("tmp_grad")) {
+                d.tmp_grad = req_number(*t, "tmp_grad", ctx, comm);
+            } else if (t->contains("heat_flux_grad")) {
+                d.tmp_grad = req_number(*t, "heat_flux_grad", ctx, comm);
+            } else {
+                d.tmp_grad = 0.0; // default: adiabatic wall (dT/dn = 0)
+            }
+
+            if (t->contains("velocity")) {
+                d.velocity = req_vec3(*t, "velocity", ctx, comm);
+            } else {
+                d.velocity = {0.0, 0.0, 0.0}; // default: stationary wall
+            }
+        } else if (type == "SUBSONIC_INLET") {
+            d.type = bc::BCType::SubsonicInlet;
+            if (!t->contains("p") && !t->contains("p_inf")) {
+                // fictious pressure for parse_inflow_descriptor
+                const_cast<toml::table*>(t)->insert_or_assign("p", 101325.0);
+            }
+            parse_inflow_descriptor(*t, d, ctx, comm);
+            
+            if (d.inflow_mode == bc::InflowMode::MachAngles || d.inflow_mode == bc::InflowMode::MachDirection) {
+                mpi::log_stat("WARNING: %s: Mach-based inflow mode selected. "
+                                "Note: velocity magnitude is evaluated assuming Ideal Gas EOS kinematics.",
+                                ctx.c_str());
+            }
+        } else if (type == "SUBSONIC_OUTLET") {
+            d.type = bc::BCType::SubsonicOutlet;
+            check_allowed_keys(*t, {"patch_id", "type", "name", "cgns_type", "global_face_count",
+                                    "p", "p_outlet", "p_back"}, ctx, comm);
+
+            if (t->contains("p_back")) {
+                d.p = req_number(*t, "p_back", ctx, comm);
+            } else if (t->contains("p_outlet")) {
+                d.p = req_number(*t, "p_outlet", ctx, comm);
+            } else if (t->contains("p")) {
+                d.p = req_number(*t, "p", ctx, comm);
+            } else {
+                fail(comm, ctx + ": missing required backpressure ('p', 'p_back', or 'p_outlet')");
+            }
+
+            check_positive(d.p, "backpressure", ctx, comm);
         } else {
             fail(comm, ctx + ": unknown BC type '" + type + "'");
-        }
+        } 
 
         ++idx;
     }

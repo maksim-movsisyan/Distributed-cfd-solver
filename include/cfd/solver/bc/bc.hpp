@@ -11,7 +11,11 @@ namespace cfd::solver::bc {
 enum class BCType {
     SupersonicInlet,
     SupersonicOutlet,
+    SubsonicInlet,
+    SubsonicOutlet,
     SlipWall,
+    NoSlipWall,
+    NoSlipWallHeatFlux,
     Symmetry,
     Farfield,
 };
@@ -24,11 +28,15 @@ enum class InflowMode {
 
 [[nodiscard]] constexpr const char* to_string(const BCType k) noexcept {
     switch (k) {
-        case BCType::SupersonicInlet:  return "SUPERSONIC_INLET";
-        case BCType::SupersonicOutlet: return "SUPERSONIC_OUTLET";
-        case BCType::SlipWall:         return "SLIP_WALL";
-        case BCType::Symmetry:         return "SYMMETRY";
-        case BCType::Farfield:         return "FARFIELD";
+        case BCType::SupersonicInlet:      return "SUPERSONIC_INLET";
+        case BCType::SupersonicOutlet:     return "SUPERSONIC_OUTLET";
+        case BCType::SubsonicInlet:        return "SUBSONIC_INLET";
+        case BCType::SubsonicOutlet:       return "SUBSONIC_OUTLET";
+        case BCType::SlipWall:             return "SLIP_WALL";
+        case BCType::NoSlipWall:           return "NO_SLIP_WALL";
+        case BCType::NoSlipWallHeatFlux:   return "NO_SLIP_WALL_HEAT_FLUX";
+        case BCType::Symmetry:             return "SYMMETRY";
+        case BCType::Farfield:             return "FARFIELD";
     }
     return "UNKNOWN";
 }

@@ -3,7 +3,6 @@
 #include <mpi.h>
 
 #include <array>
-#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <initializer_list>
@@ -222,7 +221,7 @@ SolverConfig parse_solver_config(const std::string& path, const MPI_Comm comm) {
     { // [numerics]
         const toml::table* t = req_table(root, "numerics", path, comm);
         const std::string ctx = path + " [numerics]";
-        check_allowed_keys(*t, {"flux", "reconstruction"}, ctx, comm);
+        check_allowed_keys(*t, {"flux", "reconstruction", "limiter", "venkat_k"}, ctx, comm);
         const std::string flux = req_string(*t, "flux", ctx, comm);
         if (flux == "HLLC") {
             cfg.flux = FluxType::HLLC;
@@ -230,9 +229,35 @@ SolverConfig parse_solver_config(const std::string& path, const MPI_Comm comm) {
             fail(comm, ctx + ": unsupported flux '" + flux + "' (available: HLLC)");
         }
         const std::string reco = req_string(*t, "reconstruction", ctx, comm);
-        if (reco != "FIRST_ORDER") {
-            fail(comm, ctx + ": unsupported reconstruction '" + reco + "' (available: FIRST_ORDER)");
+        if (reco == "FIRST_ORDER") {
+            cfg.reconstruction = ReconType::FirstOrder;
+        } else if (reco == "MUSCL") {
+            cfg.reconstruction = ReconType::Muscl;
+        } else {
+            fail(comm, ctx + ": unsupported reconstruction '" + reco +
+                           "' (available: FIRST_ORDER, MUSCL)");
         }
+        // Limiter: required for MUSCL, optional otherwise (default VENKAT).
+        std::string lim = "VENKAT";
+        if (t->get("limiter") != nullptr) {
+            lim = req_string(*t, "limiter", ctx, comm);
+        } else if (cfg.reconstruction == ReconType::Muscl) {
+            fail(comm, ctx + ": missing required key 'limiter' for MUSCL "
+                           "(available: VENKAT, BARTH, VAN_ALBADA)");
+        }
+        
+        if (lim == "VENKAT") {
+            cfg.limiter = LimiterType::Venkatakrishnan;
+        } else if (lim == "BARTH") {
+            cfg.limiter = LimiterType::BarthJespersen;
+        } else if (lim == "VAN_ALBADA") {
+            cfg.limiter = LimiterType::VanAlbada;
+        } else {
+            fail(comm, ctx + ": unsupported limiter '" + lim +
+                           "' (available: VENKAT, BARTH, VAN_ALBADA)");
+        }
+        cfg.limiter_venkat_k = opt_number(*t, "venkat_k", 0.5);
+        check_positive(cfg.limiter_venkat_k, "venkat_k", ctx, comm);
     }
 
     { // [time]

@@ -1,5 +1,9 @@
 // Residual evaluation R(U): the reusable functional behind every time
 // integrator (explicit stages now, matrix-free implicit later).
+//
+// The kernel consumes PRIMITIVE cell states: spatial reconstruction (1st-order or MUSCL)
+// is primitive-based, and the conserved states required by the numerical flux
+// are converted per face from the reconstructed primitives.
 #pragma once
 
 #include <algorithm>
@@ -11,6 +15,7 @@
 #include "cfd/solver/eos/ideal_gas.hpp"
 #include "cfd/solver/eos/state_conversions.hpp"
 #include "cfd/solver/fields/fields_view.hpp"
+#include "cfd/solver/reconstruction/reconstruction.hpp"
 
 namespace cfd::solver {
 
@@ -25,10 +30,11 @@ namespace cfd::solver {
  *
  * Update rule in time integrator: U^{n+1} = U^n - (dt / V) * Res
  *
- * @tparam EOS  Thermodynamic Equation of State conforming to eos::EquationOfState
- * @tparam Flux Numerical flux policy (e.g., riemann::HllcFlux)
+ * @tparam EOS   Thermodynamic Equation of State conforming to eos::EquationOfState
+ * @tparam Flux  Numerical flux policy (e.g., riemann::HllcFlux)
+ * @tparam Recon Spatial reconstruction policy (recon::FirstOrder, recon::Muscl<Limiter>)
  */
-template <eos::EquationOfState EOS, typename Flux>
+template <eos::EquationOfState EOS, typename Flux, recon::ReconstructionPolicy Recon>
 class ResidualKernel {
 public:
     ResidualKernel(const mesh::MeshPart& mp, const EOS eos)
@@ -37,18 +43,24 @@ public:
     /**
      * @brief Evaluates the spatial residual and spectral radius across the local partition.
      * 
-     * @param[in]  u    Conservative variables [rho, rhou, rhov, rhow, rhoE] (fully populated with ghosts).
-     * @param[out] res  Accumulated flux balance vector.
-     * @param[out] lam  Accumulated per-cell spectral radius (size >= n_cells).
+     * @param[in]  q     Primitive cell states [p, u, v, w, T], halo- and BC-ghost-complete.
+     * @param[in]  grad  Cell gradients (valid if Recon::kNeedsGradients == true).
+     * @param[in]  phi   Cell gradient limiters in [0, 1].
+     * @param[in]  geom  Reconstruction precomputed geometry (from Recon::build_geometry).
+     * @param[out] res   Accumulated flux balance vector.
+     * @param[out] lam   Accumulated per-cell spectral radius (size >= n_cells).
      */
-    void apply(fields::ConservativeView<const double> u,
+    void apply(fields::ConstPrimitiveView q,
+               fields::ConstPrimitiveGradView grad,
+               fields::ConstPrimitiveView phi,
+               const typename Recon::Geometry& geom,
                fields::ResidualView<double> res,
                double* CFD_RESTRICT lam) const noexcept {
-        const std::size_t n_inner  = static_cast<std::size_t>(mp_.n_inner_faces);
-        const std::size_t n_faces  = static_cast<std::size_t>(mp_.n_faces);
-        const std::size_t n_cells  = static_cast<std::size_t>(mp_.n_cells);
-        const std::size_t n_bfaces = n_faces - n_inner;
-        const std::size_t n_total  = n_cells + n_bfaces;
+        const auto n_inner  = static_cast<std::size_t>(mp_.n_inner_faces);
+        const auto n_faces  = static_cast<std::size_t>(mp_.n_faces);
+        const auto n_cells  = static_cast<std::size_t>(mp_.n_cells);
+        const auto n_bfaces = n_faces - n_inner;
+        const auto n_total  = n_cells + n_bfaces;
 
         // 1. Reset residuals and spectral radii
         std::fill(res.res1, res.res1 + n_total, 0.0);
@@ -66,21 +78,24 @@ public:
         const double* CFD_RESTRICT nz = mp_.face_normal_z.data();
         const double* CFD_RESTRICT area = mp_.face_area.data();
 
+        const recon::ReconField rf{q, grad, phi};
+
         // 2. Interior faces sweep [0, n_inner)
         for (std::size_t f = 0; f < n_inner; ++f) {
-            const std::size_t c0 = static_cast<std::size_t>(owner[f]);
-            const std::size_t c1 = static_cast<std::size_t>(neigh[f]);
+            const auto c0 = static_cast<std::size_t>(owner[f]);
+            const auto c1 = static_cast<std::size_t>(neigh[f]);
 
-            const double UL[eos::kNumVars] = {
-                u.rho[c0], u.rhou[c0], u.rhov[c0], u.rhow[c0], u.rhoE[c0]
-            };
-            const double UR[eos::kNumVars] = {
-                u.rho[c1], u.rhou[c1], u.rhov[c1], u.rhow[c1], u.rhoE[c1]
-            };
+            double qL[recon::kNumPrimitives];
+            double qR[recon::kNumPrimitives];
+            Recon::face_states(rf, geom, f, c0, c1, qL, qR);
+
+            double UL[eos::kNumVars];
+            double UR[eos::kNumVars];
+            eos::primitives_pT_to_conserved(eos_, qL[0], qL[1], qL[2], qL[3], qL[4], UL);
+            eos::primitives_pT_to_conserved(eos_, qR[0], qR[1], qR[2], qR[3], qR[4], UR);
 
             double F[eos::kNumVars];
             double smax = 0.0;
-
             Flux::face_flux(eos_, UL, UR, nx[f], ny[f], nz[f], area[f], F, smax);
 
             // Flux leaves owner, enters neighbor
@@ -101,21 +116,22 @@ public:
             lam[c1] += w;
         }
 
-        // 3. Boundary faces sweep [n_inner, n_faces)
+        // 3. Boundary faces sweep [n_inner, n_faces): owner vs. BC ghost
         for (std::size_t f = n_inner; f < n_faces; ++f) {
-            const std::size_t c0 = static_cast<std::size_t>(owner[f]);
+            const auto c0 = static_cast<std::size_t>(owner[f]);
             const std::size_t cg = n_cells + (f - n_inner);
 
-            const double UL[eos::kNumVars] = {
-                u.rho[c0], u.rhou[c0], u.rhov[c0], u.rhow[c0], u.rhoE[c0]
-            };
-            const double UR[eos::kNumVars] = {
-                u.rho[cg], u.rhou[cg], u.rhov[cg], u.rhow[cg], u.rhoE[cg]
-            };
+            double qL[recon::kNumPrimitives];
+            double qR[recon::kNumPrimitives];
+            Recon::boundary_face_states(rf, geom, f, c0, cg, qL, qR);
+
+            double UL[eos::kNumVars];
+            double UR[eos::kNumVars];
+            eos::primitives_pT_to_conserved(eos_, qL[0], qL[1], qL[2], qL[3], qL[4], UL);
+            eos::primitives_pT_to_conserved(eos_, qR[0], qR[1], qR[2], qR[3], qR[4], UR);
 
             double F[eos::kNumVars];
             double smax = 0.0;
-
             Flux::face_flux(eos_, UL, UR, nx[f], ny[f], nz[f], area[f], F, smax);
 
             // Boundary face updates owner cell only
@@ -132,13 +148,16 @@ public:
     /**
      * @brief Computes rank-local net mass and total energy flux through each boundary patch.
      */
-    void boundary_integrals(fields::ConservativeView<const double> u,
+    void boundary_integrals(fields::ConstPrimitiveView q,
+                            fields::ConstPrimitiveGradView grad,
+                            fields::ConstPrimitiveView phi,
+                            const typename Recon::Geometry& geom,
                             std::vector<double>& mass,
                             std::vector<double>& energy) const noexcept {
-        const std::size_t n_inner = static_cast<std::size_t>(mp_.n_inner_faces);
-        const std::size_t n_faces = static_cast<std::size_t>(mp_.n_faces);
-        const std::size_t n_cells = static_cast<std::size_t>(mp_.n_cells);
-        const std::size_t np      = mp_.patches.size();
+        const auto n_inner = static_cast<std::size_t>(mp_.n_inner_faces);
+        const auto n_faces = static_cast<std::size_t>(mp_.n_faces);
+        const auto n_cells = static_cast<std::size_t>(mp_.n_cells);
+        const auto np      = mp_.patches.size();
 
         mass.assign(np, 0.0);
         energy.assign(np, 0.0);
@@ -150,23 +169,26 @@ public:
         const double* CFD_RESTRICT nz = mp_.face_normal_z.data();
         const double* CFD_RESTRICT area = mp_.face_area.data();
 
+        const recon::ReconField rf{q, grad, phi};
+
         for (std::size_t f = n_inner; f < n_faces; ++f) {
             const auto c0 = static_cast<std::size_t>(owner[f]);
             const std::size_t cg = n_cells + (f - n_inner);
 
-            const double UL[eos::kNumVars] = {
-                u.rho[c0], u.rhou[c0], u.rhov[c0], u.rhow[c0], u.rhoE[c0]
-            };
-            const double UR[eos::kNumVars] = {
-                u.rho[cg], u.rhou[cg], u.rhov[cg], u.rhow[cg], u.rhoE[cg]
-            };
+            double qL[recon::kNumPrimitives];
+            double qR[recon::kNumPrimitives];
+            Recon::boundary_face_states(rf, geom, f, c0, cg, qL, qR);
+
+            double UL[eos::kNumVars];
+            double UR[eos::kNumVars];
+            eos::primitives_pT_to_conserved(eos_, qL[0], qL[1], qL[2], qL[3], qL[4], UL);
+            eos::primitives_pT_to_conserved(eos_, qR[0], qR[1], qR[2], qR[3], qR[4], UR);
 
             double F[eos::kNumVars];
             double smax = 0.0;
-
             Flux::face_flux(eos_, UL, UR, nx[f], ny[f], nz[f], area[f], F, smax);
 
-            const std::size_t p = static_cast<std::size_t>(patch[f]);
+            const auto p = static_cast<std::size_t>(patch[f]);
             mass[p]   += F[0];
             energy[p] += F[4];
         }

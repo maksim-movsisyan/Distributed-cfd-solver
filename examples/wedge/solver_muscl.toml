@@ -1,0 +1,31 @@
+# Supersonic wedge (M = 3), phase-1 second-order case: MUSCL reconstruction
+# on primitives with weighted least-squares gradients and a Venkatakrishnan
+# limiter. Initial state = inlet freestream (p = 101325 Pa, T = 300 K):
+#   rho = 1.1768292 kg/m^3, a = 347.2216 m/s, |u| = 1041.0 m/s
+
+[flow]
+eos = "IDEAL_GAS"
+gamma = 1.4
+gas_constant = 287.052874
+
+[initial]
+rho = 1.1768
+pressure = 101325.0
+velocity = [1041.0, 0.0, 0.0]
+
+[numerics]
+flux = "HLLC"
+reconstruction = "MUSCL"
+limiter = "VENKAT"
+venkat_k = 0.5
+
+[time]
+scheme = "SSP_RK3"
+cfl = 0.4
+max_iterations = 10000
+residual_tolerance = 1.0e-10
+
+[output]
+directory = "out/wedge_muscl"
+field_interval = 1000
+residual_interval = 250

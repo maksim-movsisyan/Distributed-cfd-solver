@@ -84,6 +84,17 @@ enum class TimeScheme {
     SspRk3,
 };
 
+enum class ReconType {
+    FirstOrder,
+    Muscl,
+};
+
+enum class LimiterType {
+    Venkatakrishnan,
+    BarthJespersen,
+    VanAlbada,
+};
+
 struct SolverConfig {
     // [flow]
     EqOfStateConfig flow;
@@ -95,6 +106,9 @@ struct SolverConfig {
 
     // [numerics]
     FluxType flux = FluxType::HLLC;
+    ReconType reconstruction = ReconType::FirstOrder;
+    LimiterType limiter = LimiterType::Venkatakrishnan;
+    double limiter_venkat_k = 0.5; // Venkatakrishnan smoothing coefficient
 
     // [time]
     TimeScheme scheme = TimeScheme::SspRk3;

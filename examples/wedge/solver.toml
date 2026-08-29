@@ -1,8 +1,8 @@
-# Supersonic wedge (M = 2), phase-0 validation case.
-# Initial state = inlet freestream: p = 101325 Pa, T = 300 K, M = 2 along x.
+# Supersonic wedge (M = 3), phase-0 validation case.
+# Initial state = inlet freestream: p = 101325 Pa, T = 300 K, M = 3 along x.
 #   rho  = p / (R T)          = 1.1768292...  kg/m^3
 #   a    = sqrt(gamma R T)    = 347.2216...   m/s
-#   | u | = M a               = 694.4432...   m/s
+#   | u | = M a               = 1041.0...   m/s
 
 [flow]
 eos = "IDEAL_GAS"

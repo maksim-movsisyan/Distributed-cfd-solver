@@ -1,5 +1,5 @@
 // Composition root of one solver run.
-// EOS and FluxPolicy are compile-time policy types (fully inlined into face sweeps);
+// EOS, FluxPolicy, and ReconPolicy are compile-time policy types (fully inlined);
 // all memory allocation is zero-overhead SoA via FieldsManager and FieldsView.
 #pragma once
 
@@ -10,7 +10,9 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "cfd/core/types.hpp"
@@ -24,12 +26,15 @@
 #include "cfd/solver/eos/state_conversions.hpp"
 #include "cfd/solver/fields/fields_manager.hpp"
 #include "cfd/solver/fields/fields_view.hpp"
+#include "cfd/solver/gradient/gradient.hpp"
+#include "cfd/solver/gradient/lsq_gradient.hpp"
 #include "cfd/solver/halo.hpp"
+#include "cfd/solver/reconstruction/reconstruction.hpp"
 #include "cfd/solver/residual_kernel.hpp"
 
 namespace cfd::solver {
 
-template <eos::EquationOfState EOS, typename FluxPolicy>
+template <eos::EquationOfState EOS, typename FluxPolicy, recon::ReconstructionPolicy ReconPolicy>
 class Solver {
 public:
     Solver(const SolverConfig& cfg,
@@ -37,20 +42,23 @@ public:
            const EOS eos,
            const mesh::MeshPart& mp,
            const MPI_Comm comm)
-        : mp_(mp), cfg_(cfg),
-          eos_(eos), halo_(mp, comm),
-          kernel_(mp, eos), comm_(comm) {
-        
+        : mp_(mp),
+          cfg_(cfg),
+          eos_(eos),
+          halo_(mp, comm),
+          kernel_(mp, eos),
+          comm_(comm) {
+
         // 1. Initialize boundary conditions
         bcs_.initialize(bcfg, mp, eos_.gamma(), eos_.gas_constant());
 
         // 2. Allocate SoA storage in FieldsManager
-        const std::size_t n_inner  = static_cast<std::size_t>(mp_.n_inner_faces);
-        const std::size_t n_faces  = static_cast<std::size_t>(mp_.n_faces);
-        const std::size_t n_cells  = static_cast<std::size_t>(mp_.n_cells);
-        const std::size_t n_own    = static_cast<std::size_t>(mp_.n_own);
-        const std::size_t n_bfaces = n_faces - n_inner;
-        const std::size_t n_total  = n_cells + n_bfaces;
+        const auto n_inner  = static_cast<std::size_t>(mp_.n_inner_faces);
+        const auto n_faces  = static_cast<std::size_t>(mp_.n_faces);
+        const auto n_cells  = static_cast<std::size_t>(mp_.n_cells);
+        const auto n_own    = static_cast<std::size_t>(mp_.n_own);
+        const auto n_bfaces = n_faces - n_inner;
+        const auto n_total  = n_cells + n_bfaces;
 
         allocate_fields(n_total);
 
@@ -66,6 +74,13 @@ public:
         for (std::size_t c = 0; c < n_own; ++c) {
             inv_vol_[c] = 1.0 / mp_.cell_volume[c];
         }
+
+        // 5. Gradient method + reconstruction geometry (mesh-fixed)
+        if constexpr (ReconPolicy::kNeedsGradients) {
+            adjacency_ = gradient::build_vertex_adjacency(mp_);
+            grad_method_ = std::make_unique<gradient::LsqGradient>(mp_, adjacency_);
+        }
+        geom_ = ReconPolicy::build_geometry(mp_, cfg_.limiter_venkat_k);
     }
 
     int run() {
@@ -76,8 +91,9 @@ public:
         bool have_norm0 = false;
         long long last_iter = 0;
 
-        mpi::log_info("solver: flux=%s scheme=%s cfl=%.3f max_iter=%lld",
-                      FluxPolicy::name(),
+        mpi::log_info("solver: flux=%s recon=%s limiter=%s scheme=%s cfl=%.3f max_iter=%lld",
+                      FluxPolicy::name(), ReconPolicy::name(),
+                      ReconPolicy::limiter_name(),
                       cfg_.scheme == TimeScheme::SspRk3 ? "SSP_RK3" : "FORWARD_EULER",
                       cfg_.cfl, static_cast<long long>(cfg_.max_iterations));
 
@@ -87,7 +103,8 @@ public:
             if (cfg_.scheme == TimeScheme::ForwardEuler) {
                 evaluate_residual(u_view_);
                 compute_dt();
-                sub_axpy_owned(u_view_, u_view_, alpha_.data(), res_view_);
+                sub_axpy_owned(stage_view_, u_view_, alpha_.data(), res_view_);
+                std::swap(u_view_, stage_view_);
             } else {
                 // SSP-RK3 (Shu-Osher 3-stage TVD Runge-Kutta)
                 // Stage 1: u(1) = u^n - dt/V * R(u^n)
@@ -98,11 +115,12 @@ public:
 
                 // Stage 2: u(2) = 3/4 u^n + 1/4 (u(1) - dt/V * R(u(1)))
                 evaluate_residual(stage_view_);
-                ssp_combine(stage_view_, 0.75, prev_view_, 0.25, stage_view_, alpha_.data(), res_view_);
+                ssp_combine(u_view_, 0.75, prev_view_, 0.25, stage_view_, alpha_.data(), res_view_);
 
                 // Stage 3: u^{n+1} = 1/3 u^n + 2/3 (u(2) - dt/V * R(u(2)))
-                evaluate_residual(stage_view_);
-                ssp_combine(u_view_, 1.0 / 3.0, prev_view_, 2.0 / 3.0, stage_view_, alpha_.data(), res_view_);
+                evaluate_residual(u_view_);
+                ssp_combine(stage_view_, 1.0 / 3.0, prev_view_, 2.0 / 3.0, u_view_, alpha_.data(), res_view_);
+                std::swap(u_view_, stage_view_);
             }
 
             // --- Diagnostics & Convergence ---
@@ -150,16 +168,10 @@ private:
     // --- Residual Evaluation Pipeline ---------------------------------------
 
     void evaluate_residual(fields::ConservativeView<double> u) noexcept {
-        const std::size_t n_inner  = static_cast<std::size_t>(mp_.n_inner_faces);
-        const std::size_t n_faces  = static_cast<std::size_t>(mp_.n_faces);
-        const std::size_t n_cells  = static_cast<std::size_t>(mp_.n_cells);
-        const std::size_t n_bfaces = n_faces - n_inner;
+        const auto n_own = static_cast<std::size_t>(mp_.n_own);
 
-        // 1. MPI Halo exchange on conservative variables
-        halo_.exchange(u);
-
-        // 2. Synchronize interior + MPI halo states U -> Q
-        for (std::size_t c = 0; c < n_cells; ++c) {
+        // 1. Owned conservative states -> primitives
+        for (std::size_t c = 0; c < n_own; ++c) {
             const double U_c[eos::kNumVars] = {
                 u.rho[c], u.rhou[c], u.rhov[c], u.rhow[c], u.rhoE[c]
             };
@@ -169,30 +181,28 @@ private:
                                             q_view_.tmp[c]);
         }
 
-        // 3. Populate boundary ghost cells in Q via Boundary Conditions
+        // 2. MPI halo exchange on primitives (ghost cells, one hop)
+        halo_.exchange(q_view_);
+
+        // 3. Boundary condition ghosts on the primitive fields
         bcs_.apply_all(q_view_, mp_);
 
-        // 4. Synchronize boundary ghost states Q -> U
-        for (std::size_t i = 0; i < n_bfaces; ++i) {
-            const std::size_t cg = n_cells + i;
-            double U_cg[eos::kNumVars];
-            eos::primitives_pT_to_conserved(eos_,
-                                            q_view_.prs[cg], q_view_.vx[cg],
-                                            q_view_.vy[cg], q_view_.vz[cg],
-                                            q_view_.tmp[cg], U_cg);
-            u.rho[cg]  = U_cg[0];
-            u.rhou[cg] = U_cg[1];
-            u.rhov[cg] = U_cg[2];
-            u.rhow[cg] = U_cg[3];
-            u.rhoE[cg] = U_cg[4];
+        // 4. Gradients and limiters over owned cells + packed exchange
+        if constexpr (ReconPolicy::kNeedsGradients) {
+            grad_method_->compute(q_view_.as_const(), grad_view_);
+            ReconPolicy::compute_limiters(mp_, q_view_.as_const(),
+                                          grad_view_.as_const(), adjacency_,
+                                          geom_, phi_view_);
+            halo_.exchange_grad_limiter(grad_view_, phi_view_);
         }
 
-        // 5. Evaluate Numerical Flux Residuals and Local Spectral Radii
-        kernel_.apply(u, res_view_, lam_.data());
+        // 5. Numerical flux sweeps on the reconstructed primitive states
+        kernel_.apply(q_view_.as_const(), grad_view_.as_const(), phi_view_.as_const(),
+                      geom_, res_view_, lam_.data());
     }
 
     void compute_dt() noexcept {
-        const std::size_t n_own = static_cast<std::size_t>(mp_.n_own);
+        const auto n_own = static_cast<std::size_t>(mp_.n_own);
         const double* CFD_RESTRICT lam = lam_.data();
         const double* CFD_RESTRICT vol = mp_.cell_volume.data();
         double* CFD_RESTRICT dt        = dt_.data();
@@ -220,7 +230,7 @@ private:
     void copy_owned(fields::ConservativeView<double>& dst,
                     const fields::ConservativeView<double>& src) const noexcept {
         const auto n_own = static_cast<std::size_t>(mp_.n_own);
-        copy_owned(dst, fields::ConservativeView<const double>{src.rho, src.rhou, src.rhov, src.rhow, src.rhoE}, n_own);
+        copy_owned(dst, src.as_const(), n_own);
     }
 
     // dst = x - alpha * r
@@ -281,20 +291,37 @@ private:
         mgr_.add_field<double>("res4", n_total, fields::FieldLocation::Cell);
         mgr_.add_field<double>("res5", n_total, fields::FieldLocation::Cell);
 
-        // RK3 Stages
+        // Gradients and limiters (allocated only if 2nd-order reconstruction)
+        if constexpr (ReconPolicy::kNeedsGradients) {
+            const std::size_t n_plane = 3 * n_total;
+            mgr_.add_field<double>("grad_prs", n_plane, fields::FieldLocation::Cell);
+            mgr_.add_field<double>("grad_vx",  n_plane, fields::FieldLocation::Cell);
+            mgr_.add_field<double>("grad_vy",  n_plane, fields::FieldLocation::Cell);
+            mgr_.add_field<double>("grad_vz",  n_plane, fields::FieldLocation::Cell);
+            mgr_.add_field<double>("grad_tmp", n_plane, fields::FieldLocation::Cell);
+
+            mgr_.add_field<double>("phi_prs", n_total, fields::FieldLocation::Cell);
+            mgr_.add_field<double>("phi_vx",  n_total, fields::FieldLocation::Cell);
+            mgr_.add_field<double>("phi_vy",  n_total, fields::FieldLocation::Cell);
+            mgr_.add_field<double>("phi_vz",  n_total, fields::FieldLocation::Cell);
+            mgr_.add_field<double>("phi_tmp", n_total, fields::FieldLocation::Cell);
+        }
+
+        // RK3 Previous Snapshot
         if (cfg_.scheme == TimeScheme::SspRk3) {
             mgr_.add_field<double>("prev_rho",  n_total, fields::FieldLocation::Cell);
             mgr_.add_field<double>("prev_rhou", n_total, fields::FieldLocation::Cell);
             mgr_.add_field<double>("prev_rhov", n_total, fields::FieldLocation::Cell);
             mgr_.add_field<double>("prev_rhow", n_total, fields::FieldLocation::Cell);
             mgr_.add_field<double>("prev_rhoE", n_total, fields::FieldLocation::Cell);
-
-            mgr_.add_field<double>("stage_rho",  n_total, fields::FieldLocation::Cell);
-            mgr_.add_field<double>("stage_rhou", n_total, fields::FieldLocation::Cell);
-            mgr_.add_field<double>("stage_rhov", n_total, fields::FieldLocation::Cell);
-            mgr_.add_field<double>("stage_rhow", n_total, fields::FieldLocation::Cell);
-            mgr_.add_field<double>("stage_rhoE", n_total, fields::FieldLocation::Cell);
         }
+
+        // Scratch / stage buffer
+        mgr_.add_field<double>("stage_rho",  n_total, fields::FieldLocation::Cell);
+        mgr_.add_field<double>("stage_rhou", n_total, fields::FieldLocation::Cell);
+        mgr_.add_field<double>("stage_rhov", n_total, fields::FieldLocation::Cell);
+        mgr_.add_field<double>("stage_rhow", n_total, fields::FieldLocation::Cell);
+        mgr_.add_field<double>("stage_rhoE", n_total, fields::FieldLocation::Cell);
     }
 
     void bind_views() {
@@ -322,6 +349,14 @@ private:
             mgr_.get_required_field_ptr<double>("res5")
         };
 
+        stage_view_ = {
+            mgr_.get_required_field_ptr<double>("stage_rho"),
+            mgr_.get_required_field_ptr<double>("stage_rhou"),
+            mgr_.get_required_field_ptr<double>("stage_rhov"),
+            mgr_.get_required_field_ptr<double>("stage_rhow"),
+            mgr_.get_required_field_ptr<double>("stage_rhoE")
+        };
+
         if (cfg_.scheme == TimeScheme::SspRk3) {
             prev_view_ = {
                 mgr_.get_required_field_ptr<double>("prev_rho"),
@@ -330,13 +365,24 @@ private:
                 mgr_.get_required_field_ptr<double>("prev_rhow"),
                 mgr_.get_required_field_ptr<double>("prev_rhoE")
             };
+        }
 
-            stage_view_ = {
-                mgr_.get_required_field_ptr<double>("stage_rho"),
-                mgr_.get_required_field_ptr<double>("stage_rhou"),
-                mgr_.get_required_field_ptr<double>("stage_rhov"),
-                mgr_.get_required_field_ptr<double>("stage_rhow"),
-                mgr_.get_required_field_ptr<double>("stage_rhoE")
+        if constexpr (ReconPolicy::kNeedsGradients) {
+            const std::size_t n_total = mgr_.get_field_size("rho");
+            grad_view_ = {
+                n_total,
+                mgr_.get_required_field_ptr<double>("grad_prs"),
+                mgr_.get_required_field_ptr<double>("grad_vx"),
+                mgr_.get_required_field_ptr<double>("grad_vy"),
+                mgr_.get_required_field_ptr<double>("grad_vz"),
+                mgr_.get_required_field_ptr<double>("grad_tmp")
+            };
+            phi_view_ = {
+                mgr_.get_required_field_ptr<double>("phi_prs"),
+                mgr_.get_required_field_ptr<double>("phi_vx"),
+                mgr_.get_required_field_ptr<double>("phi_vy"),
+                mgr_.get_required_field_ptr<double>("phi_vz"),
+                mgr_.get_required_field_ptr<double>("phi_tmp")
             };
         }
     }
@@ -344,14 +390,14 @@ private:
     void init_fields() {
         double U[eos::kNumVars];
         eos::primitives_rhop_to_conserved(eos_,
-                                     cfg_.init_rho,
-                                     cfg_.init_velocity[0],
-                                     cfg_.init_velocity[1],
-                                     cfg_.init_velocity[2],
-                                     cfg_.init_p,
-                                     U);
+                                          cfg_.init_rho,
+                                          cfg_.init_velocity[0],
+                                          cfg_.init_velocity[1],
+                                          cfg_.init_velocity[2],
+                                          cfg_.init_p,
+                                          U);
 
-        const std::size_t n_total = mgr_.get_field_size("rho");
+        const auto n_total = mgr_.get_field_size("rho");
         for (std::size_t c = 0; c < n_total; ++c) {
             u_view_.rho[c]  = U[0];
             u_view_.rhou[c] = U[1];
@@ -365,7 +411,7 @@ private:
 
     void residual_norms(std::array<double, eos::kNumVars>& l2) const noexcept {
         std::array<double, eos::kNumVars> local{};
-        const std::size_t n_own = static_cast<std::size_t>(mp_.n_own);
+        const auto n_own = static_cast<std::size_t>(mp_.n_own);
 
         for (std::size_t c = 0; c < n_own; ++c) {
             local[0] += res_view_.res1[c] * res_view_.res1[c];
@@ -406,11 +452,36 @@ private:
                       wall, l2[0], mom, l2[4], rel, dt_min, dt_max);
     }
 
-    void log_boundary_integrals() const {
+    void refresh_primitives_for_audit() {
+        const auto n_own = static_cast<std::size_t>(mp_.n_own);
+
+        for (std::size_t c = 0; c < n_own; ++c) {
+            const double U_c[eos::kNumVars] = {
+                u_view_.rho[c], u_view_.rhou[c], u_view_.rhov[c], u_view_.rhow[c], u_view_.rhoE[c]
+            };
+            eos::conserved_to_primitives_pT(eos_, U_c,
+                                            q_view_.prs[c], q_view_.vx[c],
+                                            q_view_.vy[c], q_view_.vz[c],
+                                            q_view_.tmp[c]);
+        }
+        halo_.exchange(q_view_);
+        bcs_.apply_all(q_view_, mp_);
+
+        if constexpr (ReconPolicy::kNeedsGradients) {
+            grad_method_->compute(q_view_.as_const(), grad_view_);
+            ReconPolicy::compute_limiters(mp_, q_view_.as_const(),
+                                          grad_view_.as_const(), adjacency_,
+                                          geom_, phi_view_);
+        }
+    }
+
+    void log_boundary_integrals() {
         std::vector<double> mass;
         std::vector<double> energy;
-        kernel_.boundary_integrals(fields::ConstConservativeView{u_view_.rho, u_view_.rhou, u_view_.rhov, u_view_.rhow, u_view_.rhoE},
-                                   mass, energy);
+
+        refresh_primitives_for_audit();
+        kernel_.boundary_integrals(q_view_.as_const(), grad_view_.as_const(),
+                                   phi_view_.as_const(), geom_, mass, energy);
 
         const auto n = static_cast<int>(mass.size());
         std::vector<double> gmass(static_cast<std::size_t>(n));
@@ -434,7 +505,7 @@ private:
     }
 
     void write_fields(const std::string& stem) const {
-        const std::size_t n_own = static_cast<std::size_t>(mp_.n_own);
+        const auto n_own = static_cast<std::size_t>(mp_.n_own);
         std::vector<double> rho(n_own), vx(n_own), vy(n_own), vz(n_own), pr(n_own), mach(n_own);
 
         for (std::size_t c = 0; c < n_own; ++c) {
@@ -474,8 +545,12 @@ private:
     EOS eos_;
     bc::BoundaryManager bcs_;
     halo::HaloExchanger halo_;
-    ResidualKernel<EOS, FluxPolicy> kernel_;
+    ResidualKernel<EOS, FluxPolicy, ReconPolicy> kernel_;
     MPI_Comm comm_{MPI_COMM_WORLD};
+
+    gradient::VertexAdjacency adjacency_;
+    std::unique_ptr<gradient::GradientMethod> grad_method_;
+    typename ReconPolicy::Geometry geom_;
 
     fields::FieldsManager mgr_;
     fields::ConservativeView<double> u_view_{};
@@ -483,6 +558,8 @@ private:
     fields::ResidualView<double> res_view_{};
     fields::ConservativeView<double> prev_view_{};
     fields::ConservativeView<double> stage_view_{};
+    fields::PrimitiveGradView<double> grad_view_{};
+    fields::PrimitiveView<double> phi_view_{};
 
     std::vector<double> lam_;     ///< Per-cell spectral radius [0, n_cells)
     std::vector<double> inv_vol_; ///< 1.0 / cell_volume [0, n_own)

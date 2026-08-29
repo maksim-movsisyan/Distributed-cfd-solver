@@ -79,29 +79,27 @@ inline void supersonic_outlet_grad_kernel(fields::PrimitiveGradView<double> s_gr
 /**
  * @class SupersonicOutletBC
  * @brief Supersonic outlet boundary condition implementation.
- * All variables and gradients are extrapolated from the inner adjacent cells.
+ * All variables and gradients are fully extrapolated from the adjacent inner cells.
  */
-class SupersonicOutletBC : public BoundaryCondition {
+template <eos::EquationOfState EOS>
+class SupersonicOutletBC final : public BoundaryCondition<EOS> {
 public:
-    /** @brief SupersonicOutletBC constructor */
-    SupersonicOutletBC(std::string zone, LocalIndex fbeg, LocalIndex fend)
-        : BoundaryCondition(std::move(zone), fbeg, fend) {}
+    SupersonicOutletBC(std::string zone, const LocalIndex fbeg, const LocalIndex fend)
+        : BoundaryCondition<EOS>(std::move(zone), fbeg, fend) {}
 
-    /** @brief SupersonicOutletBC apply implementation */
     void apply(fields::PrimitiveView<double> state,
-               const mesh::MeshPart& mesh) const override {
-        supersonic_outlet_kernel(state, mesh, m_begin, m_end);
+               const mesh::MeshPart& mesh,
+               const EOS& /*eos*/) const override {
+        supersonic_outlet_kernel(state, mesh, this->m_begin, this->m_end);
     }
 
-    /** @brief SupersonicOutletBC apply gradient implementation */
-    void apply_grad(fields::PrimitiveView<const double> state,
+    void apply_grad(fields::ConstPrimitiveView /*state*/,
                     fields::PrimitiveGradView<double> state_grad,
                     const mesh::MeshPart& mesh) const override {
-        (void)state;
-        supersonic_outlet_grad_kernel(state_grad, mesh, m_begin, m_end);
+        supersonic_outlet_grad_kernel(state_grad, mesh, this->m_begin, this->m_end);
     }
 
-    BCType kind() const override { return BCType::SupersonicOutlet; }
+    [[nodiscard]] BCType kind() const noexcept override { return BCType::SupersonicOutlet; }
 };
 
 } // namespace cfd::solver::bc

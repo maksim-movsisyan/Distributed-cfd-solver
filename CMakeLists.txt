@@ -267,7 +267,6 @@ add_library(
         src/solver/config.cpp
         src/solver/halo.cpp
         src/solver/solver.cpp
-        src/solver/bc/bc_manager.cpp
         src/solver/gradient/adjacency.cpp
         src/solver/gradient/lsq_gradient.cpp
 )

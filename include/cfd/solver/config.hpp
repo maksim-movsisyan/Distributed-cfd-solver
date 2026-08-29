@@ -22,29 +22,21 @@ namespace cfd::solver {
 // One parsed [[boundary_condition]] table.
 struct BCDescriptor {
     bc::BCType type = bc::BCType::Symmetry;
+    bc::InflowMode inflow_mode{bc::InflowMode::Velocity};
     int patch_id = -1;
 
-    // SUPERSONIC_INLET/_MACH: static p [Pa], static T [K], Mach number and a
-    // unit-normalized flow direction.
-    // NONE - velocity vector given
-    // _MACH - mach number and velocity direction given
-    double p = 101325.0;
-    double t = 300.0;
-    double mach = 2.0;
-    std::array<double, 3> velocity = {0.0, 0.0, 0.0};
-    std::array<double, 3> direction = {1.0, 0.0, 0.0};
+    // pressure and temperature
+    double p{101325.0};
+    double t{288.15};
 
-    // FARFIELD/_MACH: Mach, static p [Pa], static T [K]; alpha/beta [deg] rotate
-    // the freestream: v = V [cos(alpha) cos(beta), sin(beta),
-    //                        sin(alpha) cos(beta)]  (x streamwise, z up).
-    // NONE - velocity vector given
-    // _MACH - mach number and velocity direction given
-    double mach_inf = 2.0;
-    double p_inf = 101325.0;
-    double t_inf = 300.0;
-    std::array<double, 3> velocity_inf = {0.0, 0.0, 0.0};
-    double alpha = 0.0; // Angle of attack
-    double beta = 0.0;  // Sideslip angle
+    // velocity vector
+    std::array<double, 3> velocity{0.0, 0.0, 0.0};
+
+    // mach number, angel of atack, slip angel and direction vector
+    double mach{0.0};
+    double alpha_deg{0.0};
+    double beta_deg{0.0};
+    std::array<double, 3> direction{1.0, 0.0, 0.0};
 };
 
 struct BoundaryConfig {

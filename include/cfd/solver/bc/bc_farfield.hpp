@@ -10,6 +10,7 @@
 #include "cfd/solver/bc/bc.hpp"
 #include "cfd/solver/bc/bc_fill_gradients.hpp"
 #include "cfd/solver/bc/bc_fill_values.hpp"
+#include "cfd/solver/eos/eos_concept.hpp"
 #include "cfd/solver/fields/fields_view.hpp"
 
 namespace cfd::solver::bc {
@@ -19,12 +20,72 @@ namespace cfd::solver::bc {
  */
 struct FarfieldParams {
     double prs_inf{101325.0};   ///< Static pressure p_inf [Pa]
-    double tmp_inf{300.0};       ///< Static temperature T_inf [K]
+    double tmp_inf{288.15};     ///< Static temperature T_inf [K]
     double vx_inf{0.0};         ///< Freestream velocity-x [m/s]
     double vy_inf{0.0};         ///< Freestream velocity-y [m/s]
     double vz_inf{0.0};         ///< Freestream velocity-z [m/s]
     double gamma{1.4};          ///< Specific heat ratio [-]
     double R{287.052874};       ///< Specific gas constant [J / (kg K)]
+
+    // if pressure, vlocity and tempareature are given
+    template <eos::EquationOfState EOS>
+    static FarfieldParams from_velocities(const EOS& eos,
+                                          const double p,
+                                          const double u,
+                                          const double v,
+                                          const double w,
+                                          const double T) noexcept {
+        return FarfieldParams{p, T, u, v, w, eos.gamma(), eos.gas_constant()};
+    }
+
+    // if pressure, mach, angel of atack, slip angel and temperature are given
+    template <eos::EquationOfState EOS>
+    static FarfieldParams from_mach_angles(const EOS& eos,
+                                           const double p,
+                                           const double T,
+                                           const double mach,
+                                           const double alpha_deg,
+                                           const double beta_deg) noexcept {
+        constexpr double kDegToRad = M_PI / 180.0;
+        const double alpha_rad = alpha_deg * kDegToRad;
+        const double beta_rad  = beta_deg  * kDegToRad;
+
+        const double rho = eos.density_Tp(T, p);
+        const double a   = eos.sound_speed_rhop(rho, p);
+        const double v_mag = mach * a;
+
+        const double u = v_mag * std::cos(alpha_rad) * std::cos(beta_rad);
+        const double v = -v_mag * std::sin(beta_rad);
+        const double w = v_mag * std::sin(alpha_rad) * std::cos(beta_rad);
+
+        return FarfieldParams{p, T, u, v, w, eos.gamma(), eos.gas_constant()};
+    }
+
+    // if pressure, mach, direction vector and temperature are given
+    template <eos::EquationOfState EOS>
+    static FarfieldParams from_mach_direction(const EOS& eos,
+                                              const double p,
+                                              const double T,
+                                              const double mach,
+                                              const double dx,
+                                              const double dy,
+                                              const double dz) noexcept {
+        const double rho = eos.density_Tp(T, p);
+        const double a   = eos.sound_speed_rhop(rho, p);
+        const double v_mag = mach * a;
+
+        const double norm = std::sqrt(dx * dx + dy * dy + dz * dz);
+        const double inv_norm = (norm > 1.0e-14) ? (1.0 / norm) : 0.0;
+
+        return FarfieldParams{
+            p, T,
+            v_mag * dx * inv_norm,
+            v_mag * dy * inv_norm,
+            v_mag * dz * inv_norm,
+            eos.gamma(),
+            eos.gas_constant()
+        };
+    }
 };
 
 /** @brief Helper evaluating boundary face state from 1D Riemann Invariants */
@@ -43,8 +104,8 @@ inline void compute_riemann_farfield_state(const FarfieldParams& p,
     const double un_inf = p.vx_inf * nx + p.vy_inf * ny + p.vz_inf * nz;
 
     // Speed of sound
-    const double a_in  = std::sqrt(p.gamma * p.R * T_in);
-    const double a_inf = std::sqrt(p.gamma * p.R * p.tmp_inf);
+    const double a_in  = std::sqrt(p.gamma * p.R * std::max(T_in, 1.0e-6));
+    const double a_inf = std::sqrt(p.gamma * p.R * std::max(p.tmp_inf, 1.0e-6));
 
     const double mn_in = un_in / a_in;
 
@@ -87,40 +148,43 @@ inline void compute_riemann_farfield_state(const FarfieldParams& p,
         vy_b = vy_in + (un_b - un_in) * ny;
         vz_b = vz_in + (un_b - un_in) * nz;
 
-        const double rho_in = p_in / (p.R * T_in);
-        entropy_s = p_in / std::pow(rho_in, p.gamma);
+        const double rho_in = p_in / (p.R * std::max(T_in, 1.0e-6));
+        entropy_s = p_in / std::pow(std::max(rho_in, 1.0e-12), p.gamma);
     } else {
         // Subsonic Inflow: tangential velocity and entropy from freestream
         vx_b = p.vx_inf + (un_b - un_inf) * nx;
         vy_b = p.vy_inf + (un_b - un_inf) * ny;
         vz_b = p.vz_inf + (un_b - un_inf) * nz;
 
-        const double rho_inf = p.prs_inf / (p.R * p.tmp_inf);
-        entropy_s = p.prs_inf / std::pow(rho_inf, p.gamma);
+        const double rho_inf = p.prs_inf / (p.R * std::max(p.tmp_inf, 1.0e-6));
+        entropy_s = p.prs_inf / std::pow(std::max(rho_inf, 1.0e-12), p.gamma);
     }
 
-    const double rho_b = std::pow((a_b * a_b) / (p.gamma * entropy_s), inv_gm1);
+    const double rho_b = std::pow((a_b * a_b) / (p.gamma * std::max(entropy_s, 1.0e-12)), inv_gm1);
     p_b = (rho_b * a_b * a_b) / p.gamma;
     T_b = (a_b * a_b) / (p.gamma * p.R);
 }
 
-/** @brief Set value in ghost cell */
-inline void farfield_kernel(fields::PrimitiveView<double> s, const mesh::MeshPart& m,
-                            LocalIndex fbeg, LocalIndex fend, const FarfieldParams p) {
-    std::size_t n_cells = static_cast<std::size_t>(m.n_cells);
-    std::size_t n_inner_faces = static_cast<std::size_t>(m.n_inner_faces);
+/** @brief Set value in ghost cell for farfield */
+inline void farfield_kernel(fields::PrimitiveView<double> s,
+                            const mesh::MeshPart& m,
+                            const LocalIndex fbeg,
+                            const LocalIndex fend,
+                            const FarfieldParams& p) noexcept {
+    const auto n_cells = static_cast<std::size_t>(m.n_cells);
+    const auto n_inner_faces = static_cast<std::size_t>(m.n_inner_faces);
     std::size_t f_loc = static_cast<std::size_t>(fbeg) - n_inner_faces;
 
     for (std::size_t face_idx = static_cast<std::size_t>(fbeg);
          face_idx < static_cast<std::size_t>(fend); ++face_idx) {
-        const std::size_t in = static_cast<std::size_t>(m.face_owner[face_idx]);
-        const std::size_t gh = n_cells + f_loc;
+        const auto in = static_cast<std::size_t>(m.face_owner[face_idx]);
+        const auto gh = n_cells + f_loc;
 
         const double nx = m.face_normal_x[face_idx];
         const double ny = m.face_normal_y[face_idx];
         const double nz = m.face_normal_z[face_idx];
 
-        double pb, Tb, vxb, vyb, vzb;
+        double pb = 0.0, Tb = 0.0, vxb = 0.0, vyb = 0.0, vzb = 0.0;
         bool is_supersonic_outflow = false;
 
         compute_riemann_farfield_state(p, s.prs[in], s.tmp[in],
@@ -147,26 +211,27 @@ inline void farfield_kernel(fields::PrimitiveView<double> s, const mesh::MeshPar
     }
 }
 
-/** @brief Set gradient in ghost cell */
-inline void farfield_grad_kernel(fields::PrimitiveView<const double> s,
+/** @brief Set gradient in ghost cell for farfield */
+inline void farfield_grad_kernel(fields::ConstPrimitiveView s,
                                  fields::PrimitiveGradView<double> s_grad,
                                  const mesh::MeshPart& m,
-                                 LocalIndex fbeg, LocalIndex fend,
-                                 const FarfieldParams p) {
-    std::size_t n_cells = static_cast<std::size_t>(m.n_cells);
-    std::size_t n_inner_faces = static_cast<std::size_t>(m.n_inner_faces);
+                                 const LocalIndex fbeg,
+                                 const LocalIndex fend,
+                                 const FarfieldParams& p) noexcept {
+    const auto n_cells = static_cast<std::size_t>(m.n_cells);
+    const auto n_inner_faces = static_cast<std::size_t>(m.n_inner_faces);
     std::size_t f_loc = static_cast<std::size_t>(fbeg) - n_inner_faces;
 
     for (std::size_t face_idx = static_cast<std::size_t>(fbeg);
          face_idx < static_cast<std::size_t>(fend); ++face_idx) {
-        const std::size_t in = static_cast<std::size_t>(m.face_owner[face_idx]);
-        const std::size_t gh = n_cells + f_loc;
+        const auto in = static_cast<std::size_t>(m.face_owner[face_idx]);
+        const auto gh = n_cells + f_loc;
 
         const double nx = m.face_normal_x[face_idx];
         const double ny = m.face_normal_y[face_idx];
         const double nz = m.face_normal_z[face_idx];
 
-        double pb, Tb, vxb, vyb, vzb;
+        double pb = 0.0, Tb = 0.0, vxb = 0.0, vyb = 0.0, vzb = 0.0;
         bool is_supersonic_outflow = false;
 
         compute_riemann_farfield_state(p, s.prs[in], s.tmp[in],
@@ -201,30 +266,29 @@ inline void farfield_grad_kernel(fields::PrimitiveView<const double> s,
 
             const double rcfn = rcfx * nx + rcfy * ny + rcfz * nz;
             const double rcfn_inv = 1.0 / rcfn;
-            double gx_in, gy_in, gz_in;
 
             // Pressure
-            gx_in = s_grad.dprs_dx(in); gy_in = s_grad.dprs_dy(in); gz_in = s_grad.dprs_dz(in);
+            double gx = s_grad.dprs_dx(in), gy = s_grad.dprs_dy(in), gz = s_grad.dprs_dz(in);
             apply_grad_fixed_value_bc(s_grad.dprs_dx(gh), s_grad.dprs_dy(gh), s_grad.dprs_dz(gh),
-                                      gx_in, gy_in, gz_in, s.prs[in], pb, nx, ny, nz, rcfn_inv);
+                                      gx, gy, gz, s.prs[in], pb, nx, ny, nz, rcfn_inv);
 
             // Velocities
-            gx_in = s_grad.dvx_dx(in); gy_in = s_grad.dvx_dy(in); gz_in = s_grad.dvx_dz(in);
+            gx = s_grad.dvx_dx(in); gy = s_grad.dvx_dy(in); gz = s_grad.dvx_dz(in);
             apply_grad_fixed_value_bc(s_grad.dvx_dx(gh), s_grad.dvx_dy(gh), s_grad.dvx_dz(gh),
-                                      gx_in, gy_in, gz_in, s.vx[in], vxb, nx, ny, nz, rcfn_inv);
+                                      gx, gy, gz, s.vx[in], vxb, nx, ny, nz, rcfn_inv);
 
-            gx_in = s_grad.dvy_dx(in); gy_in = s_grad.dvy_dy(in); gz_in = s_grad.dvy_dz(in);
+            gx = s_grad.dvy_dx(in); gy = s_grad.dvy_dy(in); gz = s_grad.dvy_dz(in);
             apply_grad_fixed_value_bc(s_grad.dvy_dx(gh), s_grad.dvy_dy(gh), s_grad.dvy_dz(gh),
-                                      gx_in, gy_in, gz_in, s.vy[in], vyb, nx, ny, nz, rcfn_inv);
+                                      gx, gy, gz, s.vy[in], vyb, nx, ny, nz, rcfn_inv);
 
-            gx_in = s_grad.dvz_dx(in); gy_in = s_grad.dvz_dy(in); gz_in = s_grad.dvz_dz(in);
+            gx = s_grad.dvz_dx(in); gy = s_grad.dvz_dy(in); gz = s_grad.dvz_dz(in);
             apply_grad_fixed_value_bc(s_grad.dvz_dx(gh), s_grad.dvz_dy(gh), s_grad.dvz_dz(gh),
-                                      gx_in, gy_in, gz_in, s.vz[in], vzb, nx, ny, nz, rcfn_inv);
+                                      gx, gy, gz, s.vz[in], vzb, nx, ny, nz, rcfn_inv);
 
             // Temperature
-            gx_in = s_grad.dtmp_dx(in); gy_in = s_grad.dtmp_dy(in); gz_in = s_grad.dtmp_dz(in);
+            gx = s_grad.dtmp_dx(in); gy = s_grad.dtmp_dy(in); gz = s_grad.dtmp_dz(in);
             apply_grad_fixed_value_bc(s_grad.dtmp_dx(gh), s_grad.dtmp_dy(gh), s_grad.dtmp_dz(gh),
-                                      gx_in, gy_in, gz_in, s.tmp[in], Tb, nx, ny, nz, rcfn_inv);
+                                      gx, gy, gz, s.tmp[in], Tb, nx, ny, nz, rcfn_inv);
         }
 
         ++f_loc;
@@ -235,26 +299,28 @@ inline void farfield_grad_kernel(fields::PrimitiveView<const double> s,
  * @class FarfieldBC
  * @brief Non-reflecting characteristic boundary condition based on 1D Riemann Invariants.
  */
-class FarfieldBC : public BoundaryCondition {
+template <eos::EquationOfState EOS>
+class FarfieldBC final : public BoundaryCondition<EOS> {
 public:
-    /** @brief FarfieldBC constructor */
-    FarfieldBC(std::string zone, LocalIndex fbeg, LocalIndex fend, const FarfieldParams p)
-        : BoundaryCondition(std::move(zone), fbeg, fend), m_p(p) {}
+    FarfieldBC(std::string zone,
+               const LocalIndex fbeg,
+               const LocalIndex fend,
+               const FarfieldParams& p)
+        : BoundaryCondition<EOS>(std::move(zone), fbeg, fend), m_p(p) {}
 
-    /** @brief FarfieldBC apply implementation */
     void apply(fields::PrimitiveView<double> state,
-               const mesh::MeshPart& mesh) const override {
-        farfield_kernel(state, mesh, m_begin, m_end, m_p);
+               const mesh::MeshPart& mesh,
+               const EOS& /*eos*/) const override {
+        farfield_kernel(state, mesh, this->m_begin, this->m_end, m_p);
     }
 
-    /** @brief FarfieldBC apply gradient implementation */
-    void apply_grad(fields::PrimitiveView<const double> state,
+    void apply_grad(fields::ConstPrimitiveView state,
                     fields::PrimitiveGradView<double> state_grad,
                     const mesh::MeshPart& mesh) const override {
-        farfield_grad_kernel(state, state_grad, mesh, m_begin, m_end, m_p);
+        farfield_grad_kernel(state, state_grad, mesh, this->m_begin, this->m_end, m_p);
     }
 
-    BCType kind() const override { return BCType::Farfield; }
+    [[nodiscard]] BCType kind() const noexcept override { return BCType::Farfield; }
 
 private:
     FarfieldParams m_p;

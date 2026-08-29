@@ -22,7 +22,7 @@
 #include "cfd/mpi/mpi_util.hpp"
 #include "cfd/solver/bc/bc_manager.hpp"
 #include "cfd/solver/config.hpp"
-#include "cfd/solver/eos/ideal_gas.hpp"
+#include "cfd/solver/eos/eos_concept.hpp"
 #include "cfd/solver/eos/state_conversions.hpp"
 #include "cfd/solver/fields/fields_manager.hpp"
 #include "cfd/solver/fields/fields_view.hpp"
@@ -50,7 +50,7 @@ public:
           comm_(comm) {
 
         // 1. Initialize boundary conditions
-        bcs_.initialize(bcfg, mp, eos_.gamma(), eos_.gas_constant());
+        bcs_.initialize(bcfg, mp, eos_);
 
         // 2. Allocate SoA storage in FieldsManager
         const auto n_inner  = static_cast<std::size_t>(mp_.n_inner_faces);
@@ -187,9 +187,10 @@ private:
         // 3. Boundary condition ghosts on the primitive fields
         bcs_.apply_all(q_view_, mp_);
 
-        // 4. Gradients and limiters over owned cells + packed exchange
+        // 4. Gradients and limiters over owned cells + BCs + packed MPI exchange
         if constexpr (ReconPolicy::kNeedsGradients) {
             grad_method_->compute(q_view_.as_const(), grad_view_);
+            bcs_.apply_grad_all(q_view_.as_const(), grad_view_, mp_);
             ReconPolicy::compute_limiters(mp_, q_view_.as_const(),
                                           grad_view_.as_const(), adjacency_,
                                           geom_, phi_view_);
@@ -469,6 +470,7 @@ private:
 
         if constexpr (ReconPolicy::kNeedsGradients) {
             grad_method_->compute(q_view_.as_const(), grad_view_);
+            bcs_.apply_grad_all(q_view_.as_const(), grad_view_, mp_);
             ReconPolicy::compute_limiters(mp_, q_view_.as_const(),
                                           grad_view_.as_const(), adjacency_,
                                           geom_, phi_view_);
@@ -543,7 +545,7 @@ private:
     const mesh::MeshPart& mp_;
     SolverConfig cfg_;
     EOS eos_;
-    bc::BoundaryManager bcs_;
+    bc::BoundaryManager<EOS> bcs_;
     halo::HaloExchanger halo_;
     ResidualKernel<EOS, FluxPolicy, ReconPolicy> kernel_;
     MPI_Comm comm_{MPI_COMM_WORLD};

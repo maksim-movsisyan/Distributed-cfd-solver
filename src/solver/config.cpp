@@ -179,6 +179,124 @@ void check_positive(const double v, const char* what, const std::string& ctx,
     }
 }
 
+/**
+ * @brief Helper parsing and strictly validating Inflow / Farfield parameter sets.
+ */
+void parse_inflow_descriptor(const toml::table& t,
+                             BCDescriptor& d,
+                             const std::string& ctx,
+                             const MPI_Comm comm) {
+    const bool has_vel = t.contains("velocity") || t.contains("velocity_inf");
+    const bool has_mach = t.contains("mach");
+    const bool has_dir = t.contains("direction");
+    const bool has_angles = t.contains("alpha") || t.contains("alpha_deg") ||
+                            t.contains("beta")  || t.contains("beta_deg");
+
+    // 1. Conflict checks (Mutual Exclusivity)
+    if (has_vel && (has_mach || has_dir || has_angles)) {
+        fail(comm, ctx + ": conflicting parameters: cannot specify direct 'velocity' "
+                         "together with 'mach', 'direction', or 'alpha/beta' angles");
+    }
+    if (has_dir && has_angles) {
+        fail(comm, ctx + ": conflicting parameters: cannot specify both 'direction' vector "
+                         "and 'alpha/beta' angles");
+    }
+    if (has_dir && !has_mach) {
+        fail(comm, ctx + ": 'direction' vector requires 'mach' to be specified");
+    }
+    if (has_angles && !has_mach) {
+        fail(comm, ctx + ": 'alpha/beta' angles require 'mach' to be specified");
+    }
+    if (!has_vel && !has_mach) {
+        fail(comm, ctx + ": missing velocity definition: specify either 'velocity' vector "
+                         "or 'mach' with angles/direction");
+    }
+
+    // 2. Strict key whitelisting per detected mode
+    if (has_vel) {
+        d.inflow_mode = bc::InflowMode::Velocity;
+        check_allowed_keys(t, {"patch_id", "type", "name", "cgns_type", "global_face_count",
+                               "p", "p_inf", "t", "t_inf", "velocity", "velocity_inf"},
+                           ctx, comm);
+    } else if (has_dir) {
+        d.inflow_mode = bc::InflowMode::MachDirection;
+        check_allowed_keys(t, {"patch_id", "type", "name", "cgns_type", "global_face_count",
+                               "p", "p_inf", "t", "t_inf", "mach", "direction"},
+                           ctx, comm);
+    } else {
+        d.inflow_mode = bc::InflowMode::MachAngles;
+        check_allowed_keys(t, {"patch_id", "type", "name", "cgns_type", "global_face_count",
+                               "p", "p_inf", "t", "t_inf", "mach",
+                               "alpha", "alpha_deg", "beta", "beta_deg"},
+                           ctx, comm);
+    }
+
+    // 3. Pressure & Temperature
+    if (t.contains("p")) {
+        d.p = req_number(t, "p", ctx, comm);
+    } else if (t.contains("p_inf")) {
+        d.p = req_number(t, "p_inf", ctx, comm);
+    } else {
+        fail(comm, ctx + ": missing required pressure ('p' or 'p_inf')");
+    }
+
+    if (t.contains("t")) {
+        d.t = req_number(t, "t", ctx, comm);
+    } else if (t.contains("t_inf")) {
+        d.t = req_number(t, "t_inf", ctx, comm);
+    } else {
+        fail(comm, ctx + ": missing required temperature ('t' or 't_inf')");
+    }
+
+    check_positive(d.p, "p", ctx, comm);
+    check_positive(d.t, "t", ctx, comm);
+
+    // 4. Mode-specific payload extraction
+    switch (d.inflow_mode) {
+        case bc::InflowMode::Velocity: {
+            const std::string vkey = t.contains("velocity") ? "velocity" : "velocity_inf";
+            d.velocity = req_vec3(t, vkey.c_str(), ctx, comm);
+            break;
+        }
+
+        case bc::InflowMode::MachDirection: {
+            d.mach = req_number(t, "mach", ctx, comm);
+            check_positive(d.mach, "mach", ctx, comm);
+            d.direction = req_vec3(t, "direction", ctx, comm);
+
+            const double mag2 = d.direction[0] * d.direction[0] +
+                                d.direction[1] * d.direction[1] +
+                                d.direction[2] * d.direction[2];
+            if (mag2 < 1.0e-14) {
+                fail(comm, ctx + ": 'direction' vector cannot be zero");
+            }
+            break;
+        }
+
+        case bc::InflowMode::MachAngles: {
+            d.mach = req_number(t, "mach", ctx, comm);
+            check_positive(d.mach, "mach", ctx, comm);
+
+            if (t.contains("alpha_deg")) {
+                d.alpha_deg = req_number(t, "alpha_deg", ctx, comm);
+            } else if (t.contains("alpha")) {
+                d.alpha_deg = req_number(t, "alpha", ctx, comm);
+            } else {
+                d.alpha_deg = 0.0;
+            }
+
+            if (t.contains("beta_deg")) {
+                d.beta_deg = req_number(t, "beta_deg", ctx, comm);
+            } else if (t.contains("beta")) {
+                d.beta_deg = req_number(t, "beta", ctx, comm);
+            } else {
+                d.beta_deg = 0.0;
+            }
+            break;
+        }
+    }
+}
+
 } // anonymous namespace
 
 SolverConfig parse_solver_config(const std::string& path, const MPI_Comm comm) {
@@ -317,6 +435,10 @@ BoundaryConfig parse_boundary_config(const std::string& path,
     out.patches.resize(n_patches);
     std::vector<char> seen(n_patches, 0);
 
+    const std::initializer_list<const char*> meta = {
+        "patch_id", "type", "name", "cgns_type", "global_face_count"
+    };
+
     std::size_t idx = 0;
     for (const auto& item : *arr) {
         const toml::table* t = item.as_table();
@@ -324,6 +446,7 @@ BoundaryConfig parse_boundary_config(const std::string& path,
         if (t == nullptr) {
             fail(comm, ctx + " must be a TOML table");
         }
+
         const std::int64_t pid = req_integer(*t, "patch_id", ctx, comm);
         if (pid < 0 || pid >= static_cast<std::int64_t>(n_patches)) {
             fail(comm, ctx + ": patch_id " + std::to_string(pid) +
@@ -338,47 +461,30 @@ BoundaryConfig parse_boundary_config(const std::string& path,
         d.patch_id = static_cast<int>(pid);
         const std::string type = req_string(*t, "type", ctx, comm);
 
-        const std::initializer_list<const char*> meta = {
-            "patch_id", "type", "name", "cgns_type", "global_face_count"
-        };
-
         if (type == "SUPERSONIC_INLET") {
             d.type = bc::BCType::SupersonicInlet;
-            check_allowed_keys(*t, {"patch_id", "type", "name", "cgns_type", "global_face_count",
-                                    "p", "t", "velocity"},
-                               ctx, comm);
-            d.p = req_number(*t, "p", ctx, comm);
-            d.t = req_number(*t, "t", ctx, comm);
-            d.velocity = req_vec3(*t, "velocity", ctx, comm);
-            check_positive(d.p, "p", ctx, comm);
-            check_positive(d.t, "t", ctx, comm);
-        
+            parse_inflow_descriptor(*t, d, ctx, comm);
+
+        } else if (type == "FARFIELD") {
+            d.type = bc::BCType::Farfield;
+            parse_inflow_descriptor(*t, d, ctx, comm);
+
         } else if (type == "SUPERSONIC_OUTLET") {
             d.type = bc::BCType::SupersonicOutlet;
             check_allowed_keys(*t, meta, ctx, comm);
-        
+
         } else if (type == "SLIP_WALL") {
             d.type = bc::BCType::SlipWall;
             check_allowed_keys(*t, meta, ctx, comm);
-        
+
         } else if (type == "SYMMETRY") {
             d.type = bc::BCType::Symmetry;
             check_allowed_keys(*t, meta, ctx, comm);
-        
-        } else if (type == "FARFIELD") {
-            d.type = bc::BCType::Farfield;
-            check_allowed_keys(*t, {"patch_id", "type", "name", "cgns_type", "global_face_count",
-                                    "velocity_inf", "p_inf", "t_inf", "alpha", "beta"},
-                               ctx, comm);
-            d.p_inf = req_number(*t, "p_inf", ctx, comm);
-            d.t_inf = req_number(*t, "t_inf", ctx, comm);
-            d.velocity_inf = req_vec3(*t, "velocity_inf", ctx, comm);
-            check_positive(d.p_inf, "p_inf", ctx, comm);
-            check_positive(d.t_inf, "t_inf", ctx, comm);
-        
+
         } else {
             fail(comm, ctx + ": unknown BC type '" + type + "'");
         }
+
         ++idx;
     }
 
@@ -388,6 +494,7 @@ BoundaryConfig parse_boundary_config(const std::string& path,
                            std::to_string(p) + " ('" + mp.patches[p].name + "')");
         }
     }
+
     return out;
 }
 

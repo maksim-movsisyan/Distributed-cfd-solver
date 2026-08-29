@@ -1,6 +1,6 @@
 #pragma once
 
-#include "cfd/solver/eos/ideal_gas.hpp"
+#include "cfd/solver/eos/eos_concept.hpp"
 
 namespace cfd::solver::eos {
 

@@ -1,11 +1,15 @@
 #pragma once
 
+#include <cmath>
 #include <cstddef>
+#include <string>
+#include <utility>
 
 #include "cfd/core/types.hpp"
-#include "cfd/solver/fields/fields_view.hpp"
-#include "cfd/mesh/localmesh.hpp"
 #include "cfd/solver/bc/bc.hpp"
+#include "cfd/solver/fields/fields_view.hpp"
+#include "cfd/solver/eos/eos_concept.hpp"
+#include "cfd/mesh/localmesh.hpp"
 
 #include "cfd/solver/bc/bc_fill_values.hpp"
 #include "cfd/solver/bc/bc_fill_gradients.hpp"
@@ -13,8 +17,73 @@
 
 namespace cfd::solver::bc {
 
-/** @brief SupersonicInlet parameters */
-struct SupersonicInletParams { double prs_inlet, vx_inlet, vy_inlet, vz_inlet, tmp_inlet; };
+/** 
+ * @brief Canonical resolved primitive state for Supersonic Inlet.
+ */
+struct SupersonicInletParams {
+    double prs_inlet{101325.0};
+    double vx_inlet{0.0};
+    double vy_inlet{0.0};
+    double vz_inlet{0.0};
+    double tmp_inlet{288.15};
+
+    // if pressure, velocity vector and temperature are given
+    static SupersonicInletParams from_velocities(const double p,
+                                                 const double u,
+                                                 const double v,
+                                                 const double w,
+                                                 const double T) noexcept {
+        return SupersonicInletParams{p, u, v, w, T};
+    }
+
+    // if pressure, mach, direction unit (or not unit) vector and temperature are given
+    template <eos::EquationOfState EOS>
+    static SupersonicInletParams from_mach_direction(const EOS& eos,
+                                                     const double p,
+                                                     const double T,
+                                                     const double mach,
+                                                     const double dx,
+                                                     const double dy,
+                                                     const double dz) noexcept {
+        const double rho = eos.density_Tp(T, p);
+        const double a   = eos.sound_speed_rhop(rho, p);
+        const double v_mag = mach * a;
+
+        const double norm = std::sqrt(dx * dx + dy * dy + dz * dz);
+        const double inv_norm = (norm > 1.0e-14) ? (1.0 / norm) : 0.0;
+
+        return SupersonicInletParams{
+            p,
+            v_mag * dx * inv_norm,
+            v_mag * dy * inv_norm,
+            v_mag * dz * inv_norm,
+            T
+        };
+    }
+
+    // if pressure, mach, angel of attac, slip angel and temperature are given
+    template <eos::EquationOfState EOS>
+    static SupersonicInletParams from_mach_angles(const EOS& eos,
+                                                  const double p,
+                                                  const double T,
+                                                  const double mach,
+                                                  const double alpha_deg,
+                                                  const double beta_deg) noexcept {
+        constexpr double kDegToRad = M_PI / 180.0;
+        const double alpha_rad = alpha_deg * kDegToRad;
+        const double beta_rad  = beta_deg  * kDegToRad;
+
+        const double rho = eos.density_Tp(T, p);
+        const double a   = eos.sound_speed_rhop(rho, p);
+        const double v_mag = mach * a;
+
+        const double u = v_mag * std::cos(alpha_rad) * std::cos(beta_rad);
+        const double v = -v_mag * std::sin(beta_rad);
+        const double w = v_mag * std::sin(alpha_rad) * std::cos(beta_rad);
+
+        return SupersonicInletParams{p, u, v, w, T};
+    }
+};
 
 /** @brief Set value in ghost cell */
 inline void supersonic_inlet_kernel(fields::PrimitiveView<double> s, const mesh::MeshPart& m,
@@ -120,32 +189,32 @@ inline void supersonic_inlet_grad_kernel(fields::PrimitiveView<const double> s,
 
 
 /**
- * @struct SupersonicInletBC
- * @brief SupersonicInletBC bc implementation.
- * All variables take constant values
- */    
-class SupersonicInletBC : public BoundaryCondition {
+ * @class SupersonicInletBC
+ * @brief Supersonic Inlet BC with fixed primitive variables.
+ */
+template <eos::EquationOfState EOS>
+class SupersonicInletBC final : public BoundaryCondition<EOS> {
 public:
-    /** @brief SupersonicInletBC constructor */
-    SupersonicInletBC(std::string zone, LocalIndex fbeg, LocalIndex fend, SupersonicInletParams p) : 
-        BoundaryCondition(std::move(zone), fbeg, fend), m_p(p) {}
+    SupersonicInletBC(std::string zone,
+                      const LocalIndex fbeg,
+                      const LocalIndex fend,
+                      const SupersonicInletParams& p)
+        : BoundaryCondition<EOS>(std::move(zone), fbeg, fend), m_p(p) {}
 
-    /** @brief SupersonicInletBC apply implementation */
-    void apply(fields::PrimitiveView<double> state, 
-               const mesh::MeshPart& mesh) const override {
-        supersonic_inlet_kernel(state, mesh, m_begin, m_end, m_p);
+    void apply(fields::PrimitiveView<double> state,
+               const mesh::MeshPart& mesh,
+               const EOS& /*eos*/) const override {
+        supersonic_inlet_kernel(state, mesh, this->m_begin, this->m_end, m_p);
     }
 
-    /** @brief SupersonicInlet1BC apply gradient implementation */
-    void apply_grad(fields::PrimitiveView<const double> state, 
-                    fields::PrimitiveGradView<double> state_grad, 
+    void apply_grad(fields::ConstPrimitiveView state,
+                    fields::PrimitiveGradView<double> state_grad,
                     const mesh::MeshPart& mesh) const override {
-
-        supersonic_inlet_grad_kernel(state, state_grad, mesh, m_begin, m_end, m_p);
+        supersonic_inlet_grad_kernel(state, state_grad, mesh, this->m_begin, this->m_end, m_p);
     }
 
+[[nodiscard]] BCType kind() const noexcept override { return BCType::SupersonicInlet; }
 
-    BCType kind() const override { return BCType::SupersonicInlet; }
 private:
     SupersonicInletParams m_p;
 };

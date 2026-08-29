@@ -2,6 +2,7 @@
 
 #include "cfd/core/types.hpp"
 #include "cfd/solver/fields/fields_view.hpp"
+#include "cfd/solver/eos/eos_concept.hpp"
 #include "cfd/mesh/localmesh.hpp"
 #include <string>
 
@@ -13,6 +14,12 @@ enum class BCType {
     SlipWall,
     Symmetry,
     Farfield,
+};
+
+enum class InflowMode {
+    Velocity,      ///< Direct (u, v, w) components
+    MachAngles,    ///< Mach number + alpha_deg + beta_deg
+    MachDirection  ///< Mach number + unit direction vector [dx, dy, dz]
 };
 
 [[nodiscard]] constexpr const char* to_string(const BCType k) noexcept {
@@ -28,8 +35,11 @@ enum class BCType {
 
 /**
  * @class BoundaryCondition
- * @brief Abstract class for all boundary conditions
+ * @brief Abstract strategy interface for physical boundary patches.
+ * 
+ * Ghost cells for patch faces start at index: c_ghost = n_cells + (face_idx - n_inner_faces).
  */
+template <eos::EquationOfState EOS>
 class BoundaryCondition {
 public:
     /**
@@ -38,22 +48,21 @@ public:
      * @param[in] fend, fend_loc - end of boundary patch face indices
      * @note Indexation: [fbeg, fend)
      */
-    BoundaryCondition(std::string zone,
-                      const LocalIndex fbeg, const LocalIndex fend)
-        : m_zone(std::move(zone)),
-          m_begin(fbeg), m_end(fend) {}
+    BoundaryCondition(std::string zone, const LocalIndex fbeg, const LocalIndex fend)
+        : m_zone(std::move(zone)), m_begin(fbeg), m_end(fend) {}
     virtual ~BoundaryCondition() = default;
 
     /** @brief Patch apply subroutine */
     virtual void apply(fields::PrimitiveView<double> state, 
-                       const mesh::MeshPart& mesh) const = 0;
+                       const mesh::MeshPart& mesh,
+                       const EOS& eos) const = 0;
 
     /** @brief Patch apply gradients subroutine */
     virtual void apply_grad(fields::PrimitiveView<const double> state, 
                             fields::PrimitiveGradView<double> state_grad, 
                             const mesh::MeshPart& mesh) const = 0;
 
-    virtual BCType kind() const = 0;
+    [[nodiscard]] virtual BCType kind() const noexcept = 0;
     
     [[nodiscard]] const std::string& zone() const noexcept { return m_zone; }
     [[nodiscard]] LocalIndex begin() const noexcept { return m_begin; }

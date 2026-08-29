@@ -9,21 +9,24 @@
 #include "cfd/solver/bc/bc.hpp"
 #include "cfd/solver/bc/bc_fill_gradients.hpp"
 #include "cfd/solver/bc/bc_fill_values.hpp"
+#include "cfd/solver/eos/eos_concept.hpp"
 #include "cfd/solver/fields/fields_view.hpp"
 
 namespace cfd::solver::bc {
 
-/** @brief Set value in ghost cell */
-inline void symmetry_kernel(fields::PrimitiveView<double> s, const mesh::MeshPart& m,
-                            LocalIndex fbeg, LocalIndex fend) {
-    std::size_t n_cells = static_cast<std::size_t>(m.n_cells);
-    std::size_t n_inner_faces = static_cast<std::size_t>(m.n_inner_faces);
+/** @brief Set value in ghost cell for symmetry plane boundary */
+inline void symmetry_kernel(fields::PrimitiveView<double> s,
+                            const mesh::MeshPart& m,
+                            const LocalIndex fbeg,
+                            const LocalIndex fend) noexcept {
+    const auto n_cells = static_cast<std::size_t>(m.n_cells);
+    const auto n_inner_faces = static_cast<std::size_t>(m.n_inner_faces);
     std::size_t f_loc = static_cast<std::size_t>(fbeg) - n_inner_faces;
 
     for (std::size_t face_idx = static_cast<std::size_t>(fbeg);
          face_idx < static_cast<std::size_t>(fend); ++face_idx) {
-        const std::size_t in = static_cast<std::size_t>(m.face_owner[face_idx]); // inner (real) cell
-        const std::size_t gh = n_cells + f_loc;                                  // ghost cell = n_cells + local boundary face idx
+        const auto in = static_cast<std::size_t>(m.face_owner[face_idx]); // inner (real) cell
+        const auto gh = n_cells + f_loc;                                  // ghost cell = n_cells + local boundary face idx
 
         // ==== unit normal ====
         const double nx = m.face_normal_x[face_idx];
@@ -43,19 +46,20 @@ inline void symmetry_kernel(fields::PrimitiveView<double> s, const mesh::MeshPar
     }
 }
 
-/** @brief Set gradient in ghost cell */
-inline void symmetry_grad_kernel(fields::PrimitiveView<const double> s,
+/** @brief Set gradient in ghost cell for symmetry plane boundary */
+inline void symmetry_grad_kernel(fields::ConstPrimitiveView s,
                                  fields::PrimitiveGradView<double> s_grad,
                                  const mesh::MeshPart& m,
-                                 LocalIndex fbeg, LocalIndex fend) {
-    std::size_t n_cells = static_cast<std::size_t>(m.n_cells);
-    std::size_t n_inner_faces = static_cast<std::size_t>(m.n_inner_faces);
+                                 const LocalIndex fbeg,
+                                 const LocalIndex fend) noexcept {
+    const auto n_cells = static_cast<std::size_t>(m.n_cells);
+    const auto n_inner_faces = static_cast<std::size_t>(m.n_inner_faces);
     std::size_t f_loc = static_cast<std::size_t>(fbeg) - n_inner_faces;
 
     for (std::size_t face_idx = static_cast<std::size_t>(fbeg);
          face_idx < static_cast<std::size_t>(fend); ++face_idx) {
-        const std::size_t in = static_cast<std::size_t>(m.face_owner[face_idx]); // inner (real) cell
-        const std::size_t gh = n_cells + f_loc;                                  // ghost cell = n_cells + local boundary face idx
+        const auto in = static_cast<std::size_t>(m.face_owner[face_idx]); // inner (real) cell
+        const auto gh = n_cells + f_loc;                                  // ghost cell = n_cells + local boundary face idx
 
         // ==== unit normal ====
         const double nx = m.face_normal_x[face_idx];
@@ -114,26 +118,25 @@ inline void symmetry_grad_kernel(fields::PrimitiveView<const double> s,
  * @class SymmetryBC
  * @brief Symmetry boundary condition implementation.
  */
-class SymmetryBC : public BoundaryCondition {
+template <eos::EquationOfState EOS>
+class SymmetryBC final : public BoundaryCondition<EOS> {
 public:
-    /** @brief SymmetryBC constructor */
-    SymmetryBC(std::string zone, LocalIndex fbeg, LocalIndex fend)
-        : BoundaryCondition(std::move(zone), fbeg, fend) {}
+    SymmetryBC(std::string zone, const LocalIndex fbeg, const LocalIndex fend)
+        : BoundaryCondition<EOS>(std::move(zone), fbeg, fend) {}
 
-    /** @brief SymmetryBC apply implementation */
     void apply(fields::PrimitiveView<double> state,
-               const mesh::MeshPart& mesh) const override {
-        symmetry_kernel(state, mesh, m_begin, m_end);
+               const mesh::MeshPart& mesh,
+               const EOS& /*eos*/) const override {
+        symmetry_kernel(state, mesh, this->m_begin, this->m_end);
     }
 
-    /** @brief SymmetryBC apply gradient implementation */
-    void apply_grad(fields::PrimitiveView<const double> state,
+    void apply_grad(fields::ConstPrimitiveView state,
                     fields::PrimitiveGradView<double> state_grad,
                     const mesh::MeshPart& mesh) const override {
-        symmetry_grad_kernel(state, state_grad, mesh, m_begin, m_end);
+        symmetry_grad_kernel(state, state_grad, mesh, this->m_begin, this->m_end);
     }
 
-    BCType kind() const override { return BCType::Symmetry; }
+    [[nodiscard]] BCType kind() const noexcept override { return BCType::Symmetry; }
 };
 
 } // namespace cfd::solver::bc

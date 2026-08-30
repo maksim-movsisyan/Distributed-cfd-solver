@@ -53,12 +53,12 @@ public:
         bcs_.initialize(bcfg, mp, eos_);
 
         // 2. Allocate SoA storage in FieldsManager
-        const auto n_inner  = static_cast<std::size_t>(mp_.n_inner_faces);
-        const auto n_faces  = static_cast<std::size_t>(mp_.n_faces);
-        const auto n_cells  = static_cast<std::size_t>(mp_.n_cells);
-        const auto n_own    = static_cast<std::size_t>(mp_.n_own);
-        const auto n_bfaces = n_faces - n_inner;
-        const auto n_total  = n_cells + n_bfaces;
+        const std::size_t n_inner  = static_cast<std::size_t>(mp_.n_inner_faces);
+        const std::size_t n_faces  = static_cast<std::size_t>(mp_.n_faces);
+        const std::size_t n_cells  = static_cast<std::size_t>(mp_.n_cells);
+        const std::size_t n_own    = static_cast<std::size_t>(mp_.n_own);
+        const std::size_t n_bfaces = n_faces - n_inner;
+        const std::size_t n_total  = n_cells + n_bfaces;
 
         allocate_fields(n_total);
 
@@ -168,7 +168,7 @@ private:
     // --- Residual Evaluation Pipeline ---------------------------------------
 
     void evaluate_residual(fields::ConservativeView<double> u) noexcept {
-        const auto n_own = static_cast<std::size_t>(mp_.n_own);
+        const std::size_t n_own = static_cast<std::size_t>(mp_.n_own);
 
         // 1. Owned conservative states -> primitives
         for (std::size_t c = 0; c < n_own; ++c) {
@@ -239,7 +239,7 @@ private:
                         const fields::ConservativeView<double>& x,
                         const double* CFD_RESTRICT alpha,
                         const fields::ResidualView<double>& r) const noexcept {
-        const auto n_own = static_cast<std::size_t>(mp_.n_own);
+        const std::size_t n_own = static_cast<std::size_t>(mp_.n_own);
         for (std::size_t c = 0; c < n_own; ++c) {
             const double a = alpha[c];
             dst.rho[c]  = x.rho[c]  - a * r.res1[c];
@@ -398,7 +398,7 @@ private:
                                           cfg_.init_p,
                                           U);
 
-        const auto n_total = mgr_.get_field_size("rho");
+        const std::size_t n_total = mgr_.get_field_size("rho");
         for (std::size_t c = 0; c < n_total; ++c) {
             u_view_.rho[c]  = U[0];
             u_view_.rhou[c] = U[1];
@@ -412,7 +412,7 @@ private:
 
     void residual_norms(std::array<double, eos::kNumVars>& l2) const noexcept {
         std::array<double, eos::kNumVars> local{};
-        const auto n_own = static_cast<std::size_t>(mp_.n_own);
+        const std::size_t n_own = static_cast<std::size_t>(mp_.n_own);
 
         for (std::size_t c = 0; c < n_own; ++c) {
             local[0] += res_view_.res1[c] * res_view_.res1[c];

@@ -81,12 +81,16 @@ enum class TimeScheme {
 enum class ReconType {
     FirstOrder,
     Muscl,
+    MusclDirectional
 };
 
 enum class LimiterType {
+    None,
     Venkatakrishnan,
     BarthJespersen,
     VanAlbada,
+    Minmod1D,
+    VanAlbada1D
 };
 
 struct SolverConfig {

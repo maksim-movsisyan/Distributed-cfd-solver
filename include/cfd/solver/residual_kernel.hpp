@@ -12,7 +12,7 @@
 
 #include "cfd/core/types.hpp"
 #include "cfd/mesh/localmesh.hpp"
-#include "cfd/solver/eos/ideal_gas.hpp"
+#include "cfd/solver/eos/eos_concept.hpp"
 #include "cfd/solver/eos/state_conversions.hpp"
 #include "cfd/solver/fields/fields_view.hpp"
 #include "cfd/solver/reconstruction/reconstruction.hpp"
@@ -56,11 +56,11 @@ public:
                const typename Recon::Geometry& geom,
                fields::ResidualView<double> res,
                double* CFD_RESTRICT lam) const noexcept {
-        const auto n_inner  = static_cast<std::size_t>(mp_.n_inner_faces);
-        const auto n_faces  = static_cast<std::size_t>(mp_.n_faces);
-        const auto n_cells  = static_cast<std::size_t>(mp_.n_cells);
-        const auto n_bfaces = n_faces - n_inner;
-        const auto n_total  = n_cells + n_bfaces;
+        const std::size_t n_inner  = static_cast<std::size_t>(mp_.n_inner_faces);
+        const std::size_t n_faces  = static_cast<std::size_t>(mp_.n_faces);
+        const std::size_t n_cells  = static_cast<std::size_t>(mp_.n_cells);
+        const std::size_t n_bfaces = n_faces - n_inner;
+        const std::size_t n_total  = n_cells + n_bfaces;
 
         // 1. Reset residuals and spectral radii
         std::fill(res.res1, res.res1 + n_total, 0.0);
@@ -82,8 +82,8 @@ public:
 
         // 2. Interior faces sweep [0, n_inner)
         for (std::size_t f = 0; f < n_inner; ++f) {
-            const auto c0 = static_cast<std::size_t>(owner[f]);
-            const auto c1 = static_cast<std::size_t>(neigh[f]);
+            const std::size_t c0 = static_cast<std::size_t>(owner[f]);
+            const std::size_t c1 = static_cast<std::size_t>(neigh[f]);
 
             double qL[recon::kNumPrimitives];
             double qR[recon::kNumPrimitives];
@@ -118,7 +118,7 @@ public:
 
         // 3. Boundary faces sweep [n_inner, n_faces): owner vs. BC ghost
         for (std::size_t f = n_inner; f < n_faces; ++f) {
-            const auto c0 = static_cast<std::size_t>(owner[f]);
+            const std::size_t c0 = static_cast<std::size_t>(owner[f]);
             const std::size_t cg = n_cells + (f - n_inner);
 
             double qL[recon::kNumPrimitives];
@@ -154,10 +154,10 @@ public:
                             const typename Recon::Geometry& geom,
                             std::vector<double>& mass,
                             std::vector<double>& energy) const noexcept {
-        const auto n_inner = static_cast<std::size_t>(mp_.n_inner_faces);
-        const auto n_faces = static_cast<std::size_t>(mp_.n_faces);
-        const auto n_cells = static_cast<std::size_t>(mp_.n_cells);
-        const auto np      = mp_.patches.size();
+        const std::size_t n_inner = static_cast<std::size_t>(mp_.n_inner_faces);
+        const std::size_t n_faces = static_cast<std::size_t>(mp_.n_faces);
+        const std::size_t n_cells = static_cast<std::size_t>(mp_.n_cells);
+        const std::size_t np      = mp_.patches.size();
 
         mass.assign(np, 0.0);
         energy.assign(np, 0.0);
@@ -172,7 +172,7 @@ public:
         const recon::ReconField rf{q, grad, phi};
 
         for (std::size_t f = n_inner; f < n_faces; ++f) {
-            const auto c0 = static_cast<std::size_t>(owner[f]);
+            const std::size_t c0 = static_cast<std::size_t>(owner[f]);
             const std::size_t cg = n_cells + (f - n_inner);
 
             double qL[recon::kNumPrimitives];
@@ -188,7 +188,7 @@ public:
             double smax = 0.0;
             Flux::face_flux(eos_, UL, UR, nx[f], ny[f], nz[f], area[f], F, smax);
 
-            const auto p = static_cast<std::size_t>(patch[f]);
+            const std::size_t p = static_cast<std::size_t>(patch[f]);
             mass[p]   += F[0];
             energy[p] += F[4];
         }

@@ -165,7 +165,8 @@ struct Muscl {
             // 1. Determine neighbor extrema (including self)
             double qmax[kNumPrimitives] = {prs[c], vx[c], vy[c], vz[c], tmp[c]};
             double qmin[kNumPrimitives] = {prs[c], vx[c], vy[c], vz[c], tmp[c]};
-
+            const double qc[kNumPrimitives] = {prs[c], vx[c], vy[c], vz[c], tmp[c]};
+            
             for (LocalIndex j = nbo[c]; j < nbo[c + 1]; ++j) {
                 const auto js = static_cast<std::size_t>(nbc[j]);
                 qmax[0] = std::max(qmax[0], prs[js]);
@@ -207,8 +208,6 @@ struct Muscl {
                     g_vz[0] * ex + g_vz[1] * ey + g_vz[2] * ez,
                     g_t[0]  * ex + g_t[1]  * ey + g_t[2]  * ez
                 };
-
-                const double qc[kNumPrimitives] = {prs[c], vx[c], vy[c], vz[c], tmp[c]};
 
                 for (std::size_t v = 0; v < kNumPrimitives; ++v) {
                     const double d_nb = (df[v] > 0.0) ? (qmax[v] - qc[v]) : (qmin[v] - qc[v]);

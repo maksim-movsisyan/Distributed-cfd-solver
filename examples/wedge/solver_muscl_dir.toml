@@ -15,8 +15,8 @@ velocity = [1041.0, 0.0, 0.0]
 
 [numerics]
 flux = "HLLC"
-reconstruction = "MUSCL"
-limiter = "VENKAT"
+reconstruction = "MUSCL_DIRECTIONAL"
+limiter = "MINMOD_1D"
 venkat_k = 0.5
 
 [time]
@@ -26,6 +26,6 @@ max_iterations = 4000
 residual_tolerance = 1.0e-10
 
 [output]
-directory = "out/wedge_muscl"
+directory = "out/wedge_muscl_dir"
 field_interval = 1000
 residual_interval = 250

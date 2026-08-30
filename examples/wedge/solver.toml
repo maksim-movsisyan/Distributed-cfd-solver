@@ -19,8 +19,8 @@ flux = "HLLC"
 reconstruction = "FIRST_ORDER"
 
 [time]
-scheme = "SSP_RK3"
-cfl = 0.4
+scheme = "FORWARD_EULER"
+cfl = 2.0
 max_iterations = 10000
 residual_tolerance = 1.0e-10
 

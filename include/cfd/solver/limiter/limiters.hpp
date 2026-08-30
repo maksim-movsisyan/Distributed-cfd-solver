@@ -9,6 +9,8 @@
 //   eps2       = smoothing parameter (K * h)^3 to preserve convergence.
 #pragma once
 
+#include <algorithm>
+
 namespace cfd::solver::limiter {
 
 /**
@@ -85,6 +87,36 @@ struct VanAlbada {
 
         const double num = delta_nb * delta_nb + prod;
         return num / den;
+    }
+};
+
+// --- 1D Scalar TVD Limiters -------------------------------------------------
+
+struct Minmod1D {
+    static constexpr const char* name() noexcept { return "MINMOD_1D"; }
+    [[nodiscard]] static constexpr double phi(const double r) noexcept {
+        return (r <= 0.0) ? 0.0 : std::min(r, 1.0);
+    }
+};
+
+struct VanLeer1D {
+    static constexpr const char* name() noexcept { return "VAN_LEER_1D"; }
+    [[nodiscard]] static constexpr double phi(const double r) noexcept {
+        return (r <= 0.0) ? 0.0 : (2.0 * r) / (r + 1.0);
+    }
+};
+
+struct Superbee1D {
+    static constexpr const char* name() noexcept { return "SUPERBEE_1D"; }
+    [[nodiscard]] static constexpr double phi(const double r) noexcept {
+        return (r <= 0.0) ? 0.0 : std::max(std::min(2.0 * r, 1.0), std::min(r, 2.0));
+    }
+};
+
+struct VanAlbada1D {
+    static constexpr const char* name() noexcept { return "VAN_ALBADA_1D"; }
+    [[nodiscard]] static constexpr double phi(const double r) noexcept {
+        return (r <= 0.0) ? 0.0 : (r * r + r) / (r * r + 1.0);
     }
 };
 

@@ -340,40 +340,50 @@ SolverConfig parse_solver_config(const std::string& path, const MPI_Comm comm) {
         const toml::table* t = req_table(root, "numerics", path, comm);
         const std::string ctx = path + " [numerics]";
         check_allowed_keys(*t, {"flux", "reconstruction", "limiter", "venkat_k"}, ctx, comm);
+
         const std::string flux = req_string(*t, "flux", ctx, comm);
         if (flux == "HLLC") {
             cfg.flux = FluxType::HLLC;
         } else {
             fail(comm, ctx + ": unsupported flux '" + flux + "' (available: HLLC)");
         }
+
         const std::string reco = req_string(*t, "reconstruction", ctx, comm);
         if (reco == "FIRST_ORDER") {
             cfg.reconstruction = ReconType::FirstOrder;
+            cfg.limiter = LimiterType::None;
+
         } else if (reco == "MUSCL") {
             cfg.reconstruction = ReconType::Muscl;
+            const std::string lim = req_string(*t, "limiter", ctx, comm);
+            if (lim == "VENKAT") {
+                cfg.limiter = LimiterType::Venkatakrishnan;
+            } else if (lim == "BARTH") {
+                cfg.limiter = LimiterType::BarthJespersen;
+            } else if (lim == "VAN_ALBADA") {
+                cfg.limiter = LimiterType::VanAlbada;
+            } else {
+                fail(comm, ctx + ": invalid limiter '" + lim + 
+                            "' for MUSCL (available: VENKAT, BARTH, VAN_ALBADA)");
+            }
+
+        } else if (reco == "MUSCL_DIRECTIONAL") {
+            cfg.reconstruction = ReconType::MusclDirectional;
+            const std::string lim = req_string(*t, "limiter", ctx, comm);
+            if (lim == "MINMOD_1D") {
+                cfg.limiter = LimiterType::Minmod1D;
+            } else if (lim == "VAN_ALBADA_1D") {
+                cfg.limiter = LimiterType::VanAlbada1D;
+            } else {
+                fail(comm, ctx + ": invalid limiter '" + lim + 
+                            "' for MUSCL_DIRECTIONAL (available: MINMOD_1D, VAN_ALBADA_1D)");
+            }
+
         } else {
             fail(comm, ctx + ": unsupported reconstruction '" + reco +
-                           "' (available: FIRST_ORDER, MUSCL)");
+                           "' (available: FIRST_ORDER, MUSCL, MUSCL_DIRECTIONAL)");
         }
-        // Limiter: required for MUSCL, optional otherwise (default VENKAT).
-        std::string lim = "VENKAT";
-        if (t->get("limiter") != nullptr) {
-            lim = req_string(*t, "limiter", ctx, comm);
-        } else if (cfg.reconstruction == ReconType::Muscl) {
-            fail(comm, ctx + ": missing required key 'limiter' for MUSCL "
-                           "(available: VENKAT, BARTH, VAN_ALBADA)");
-        }
-        
-        if (lim == "VENKAT") {
-            cfg.limiter = LimiterType::Venkatakrishnan;
-        } else if (lim == "BARTH") {
-            cfg.limiter = LimiterType::BarthJespersen;
-        } else if (lim == "VAN_ALBADA") {
-            cfg.limiter = LimiterType::VanAlbada;
-        } else {
-            fail(comm, ctx + ": unsupported limiter '" + lim +
-                           "' (available: VENKAT, BARTH, VAN_ALBADA)");
-        }
+
         cfg.limiter_venkat_k = opt_number(*t, "venkat_k", 0.5);
         check_positive(cfg.limiter_venkat_k, "venkat_k", ctx, comm);
     }

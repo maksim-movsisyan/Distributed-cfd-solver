@@ -1,6 +1,5 @@
 #pragma once
 
-#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <vector>
@@ -8,45 +7,16 @@
 #include "cfd/mesh/localmesh.hpp"
 #include "cfd/solver/fields/fields_view.hpp"
 #include "cfd/solver/reconstruction/reconstruction.hpp"
+#include "cfd/solver/limiter/limiters.hpp"
 
 namespace cfd::solver::recon {
-
-// --- 1D Scalar TVD Limiters -------------------------------------------------
-
-struct Minmod1D {
-    static constexpr const char* name() noexcept { return "MINMOD_1D"; }
-    [[nodiscard]] static constexpr double phi(const double r) noexcept {
-        return (r <= 0.0) ? 0.0 : std::min(r, 1.0);
-    }
-};
-
-struct VanLeer1D {
-    static constexpr const char* name() noexcept { return "VAN_LEER_1D"; }
-    [[nodiscard]] static constexpr double phi(const double r) noexcept {
-        return (r <= 0.0) ? 0.0 : (2.0 * r) / (r + 1.0);
-    }
-};
-
-struct Superbee1D {
-    static constexpr const char* name() noexcept { return "SUPERBEE_1D"; }
-    [[nodiscard]] static constexpr double phi(const double r) noexcept {
-        return (r <= 0.0) ? 0.0 : std::max(std::min(2.0 * r, 1.0), std::min(r, 2.0));
-    }
-};
-
-struct VanAlbada1D {
-    static constexpr const char* name() noexcept { return "VAN_ALBADA_1D"; }
-    [[nodiscard]] static constexpr double phi(const double r) noexcept {
-        return (r <= 0.0) ? 0.0 : (r * r + r) / (r * r + 1.0);
-    }
-};
 
 // --- Directional MUSCL Reconstruction Policy ---------------------------------
 
 template <typename Limiter1D>
-struct DirectionalMuscl {
+struct MusclDirectional {
     static constexpr bool kNeedsGradients = true;
-    static constexpr const char* name() noexcept { return "DIRECTIONAL_MUSCL"; }
+    static constexpr const char* name() noexcept { return "MUSCL_DIRECTIONAL"; }
     static constexpr const char* limiter_name() noexcept { return Limiter1D::name(); }
 
     struct Geometry {
@@ -57,8 +27,8 @@ struct DirectionalMuscl {
 
     [[nodiscard]] static Geometry build_geometry(const mesh::MeshPart& mp,
                                                  const double /*venkat_k*/ = 0.0) {
-        const auto n_inner = static_cast<std::size_t>(mp.n_inner_faces);
-        const auto n_faces = static_cast<std::size_t>(mp.n_faces);
+        const std::size_t n_inner = static_cast<std::size_t>(mp.n_inner_faces);
+        const std::size_t n_faces = static_cast<std::size_t>(mp.n_faces);
 
         Geometry g;
         g.xix.resize(n_faces, 0.0);
@@ -66,8 +36,8 @@ struct DirectionalMuscl {
         g.xiz.resize(n_faces, 0.0);
 
         for (std::size_t f = 0; f < n_inner; ++f) {
-            const auto c0 = static_cast<std::size_t>(mp.face_owner[f]);
-            const auto c1 = static_cast<std::size_t>(mp.face_neigh[f]);
+            const std::size_t c0 = static_cast<std::size_t>(mp.face_owner[f]);
+            const std::size_t c1 = static_cast<std::size_t>(mp.face_neigh[f]);
             g.xix[f] = mp.cell_centroid_x[c1] - mp.cell_centroid_x[c0];
             g.xiy[f] = mp.cell_centroid_y[c1] - mp.cell_centroid_y[c0];
             g.xiz[f] = mp.cell_centroid_z[c1] - mp.cell_centroid_z[c0];
@@ -148,12 +118,23 @@ struct DirectionalMuscl {
                                      const std::size_t cg,
                                      double qL[kNumPrimitives],
                                      double qR[kNumPrimitives]) noexcept {
-        qL[0] = s.q.prs[c0]; qL[1] = s.q.vx[c0]; qL[2] = s.q.vy[c0]; qL[3] = s.q.vz[c0]; qL[4] = s.q.tmp[c0];
-        qR[0] = s.q.prs[cg]; qR[1] = s.q.vx[cg]; qR[2] = s.q.vy[cg]; qR[3] = s.q.vz[cg]; qR[4] = s.q.tmp[cg];
+        qL[0] = s.q.prs[c0];
+        qL[1] = s.q.vx[c0];
+        qL[2] = s.q.vy[c0];
+        qL[3] = s.q.vz[c0];
+        qL[4] = s.q.tmp[c0];
+
+        qR[0] = s.q.prs[cg];
+        qR[1] = s.q.vx[cg];
+        qR[2] = s.q.vy[cg];
+        qR[3] = s.q.vz[cg];
+        qR[4] = s.q.tmp[cg];
     }
 };
 
-static_assert(ReconstructionPolicy<DirectionalMuscl<Minmod1D>>);
-static_assert(ReconstructionPolicy<DirectionalMuscl<VanLeer1D>>);
+static_assert(ReconstructionPolicy<MusclDirectional<limiter::Minmod1D>>);
+static_assert(ReconstructionPolicy<MusclDirectional<limiter::VanLeer1D>>);
+static_assert(ReconstructionPolicy<MusclDirectional<limiter::Superbee1D>>);
+static_assert(ReconstructionPolicy<MusclDirectional<limiter::VanAlbada1D>>);
 
 } // namespace cfd::solver::recon

@@ -1,83 +1,85 @@
-// One-hop non-blocking MPI halo exchanger for SoA field views, gradients, and limiters.
 #pragma once
 
 #include <mpi.h>
 
 #include <cstddef>
+#include <span>
 #include <vector>
 
 #include "cfd/mesh/localmesh.hpp"
-#include "cfd/solver/fields/fields_view.hpp"
 
 namespace cfd::solver::halo {
 
-inline constexpr std::size_t kGradPayload = 20; // 15 gradient doubles (3 dims x 5 vars) + 5 limiter doubles
-
 /**
  * @class HaloExchanger
- * @brief Zero-allocation MPI halo exchanger for cell fields, gradients, and limiters.
- * 
- * Manages non-blocking point-to-point exchanges with partition neighbours.
- * Data is unpacked directly into the halo ghost region [n_own_cells, n_cells).
+ * @brief Zero-allocation aggregated MPI halo exchanger for registered cell fields.
+ *
+ * Packs all registered variables per phase into a SINGLE contiguous message
+ * per partition neighbour, minimizing network latency and MPI overhead.
  */
 class HaloExchanger {
 public:
     HaloExchanger(const mesh::MeshPart& mp, MPI_Comm comm);
+    ~HaloExchanger() = default;
 
-    // --- Primary Fields Exchange (5 variables: Conservative or Primitive) ---
-    // --- All-in-one blocking exchange ---
-    void exchange(fields::ConservativeView<double> u);
-    void exchange(fields::PrimitiveView<double> q);
+    // Non-copyable, non-movable (maintains stable MPI buffers and internal pointers)
+    HaloExchanger(const HaloExchanger&) = delete;
+    HaloExchanger& operator=(const HaloExchanger&) = delete;
+    HaloExchanger(HaloExchanger&&) = delete;
+    HaloExchanger& operator=(HaloExchanger&&) = delete;
 
-    // --- Non-blocking split exchange (for computation / communication overlap) ---
-    void start_exchange(fields::ConservativeView<double> u);
-    void finish_exchange(fields::ConservativeView<double> u);
+    // --- Registration (Initialization Time Only) -----------------------------
 
-    void start_exchange(fields::PrimitiveView<double> q);
-    void finish_exchange(fields::PrimitiveView<double> q);
+    /**
+     * @brief Registers standard cell fields (1 double per cell).
+     * @param fields Pointers to contiguous cell arrays of size >= n_cells.
+     */
+    void register_cell_fields(std::span<double* const> fields);
 
-    // --- 2nd-Order Gradients + Limiters Combined Exchange (20 variables) ---
-    // --- All-in-one blocking exchange ---
-    void exchange_grad_limiter(fields::PrimitiveGradView<double> grad,
-                               fields::PrimitiveView<double> phi);
+    /**
+     * @brief Registers gradient components (3 planes per var) and limiter arrays.
+     * @param grad_bases   Base pointers for each variable (dx is at base, dy at base + stride, dz at base + 2*stride).
+     * @param plane_stride Stride between gradient planes in doubles (usually allocated cell count).
+     * @param limiters     Optional limiter field pointers (1 double per cell). Can be empty.
+     */
+    void register_grad_limiters(std::span<double* const> grad_bases,
+                                std::size_t plane_stride,
+                                std::span<double* const> limiters);
 
-    // --- Non-blocking split exchange (for computation / communication overlap) ---
-    void start_exchange_grad_limiter(fields::PrimitiveGradView<double> grad,
-                                     fields::PrimitiveView<double> phi);
-    void finish_exchange_grad_limiter(fields::PrimitiveGradView<double> grad,
-                                      fields::PrimitiveView<double> phi);
+    // --- Primary Fields Communication Phase ----------------------------------
+    void exchange_fields();
+    void start_exchange_fields();
+    void finish_exchange_fields();
+
+    // --- Gradients + Limiters Communication Phase ----------------------------
+    void exchange_grad_limiters();
+    void start_exchange_grad_limiters();
+    void finish_exchange_grad_limiters();
+
+    // --- Diagnostics ---------------------------------------------------------
+    [[nodiscard]] std::size_t num_registered_fields() const noexcept { return fields_phase_.ptrs.size(); }
+    [[nodiscard]] std::size_t num_registered_grads_and_limiters() const noexcept { return grads_phase_.ptrs.size(); }
 
 private:
-    void post_field_irecvs();
-    void post_grad_irecvs();
+    struct PhaseData {
+        std::vector<double*> ptrs;             // Flat array of SoA field pointers
+        std::vector<double>  send_buf;
+        std::vector<double>  recv_buf;
+        std::vector<MPI_Request> requests;     // [0..nnb) - Recv, [nnb..2*nnb) - Send
+        int tag = 0;
+    };
 
-    template <typename View>
-    void pack_and_isend_fields(const View& v);
-
-    template <typename View>
-    void unpack_field_ghosts(View& v);
-
-    void pack_and_isend_grad(fields::PrimitiveGradView<double> grad,
-                             fields::PrimitiveView<double> phi);
-
-    void unpack_grad_ghosts(fields::PrimitiveGradView<double> grad,
-                            fields::PrimitiveView<double> phi);
+    void resize_phase(PhaseData& phase, const char* phase_name);
+    void post_irecvs(PhaseData& phase);
+    void pack_and_isend(PhaseData& phase);
+    void unpack_ghosts(PhaseData& phase);
 
     MPI_Comm comm_{MPI_COMM_NULL};
     const mesh::MeshPart& mp_;
     std::vector<int> nb_ranks_;
 
-    // MPI Request handles
-    std::vector<MPI_Request> field_requests_;
-    std::vector<MPI_Request> grad_requests_;
-
-    // Buffers for 5-variable field exchanges
-    std::vector<double> send_buf_;
-    std::vector<double> recv_buf_;
-
-    // Buffers for 20-variable gradient+limiter exchanges
-    std::vector<double> grad_send_buf_;
-    std::vector<double> grad_recv_buf_;
+    PhaseData fields_phase_;
+    PhaseData grads_phase_;
 };
 
 } // namespace cfd::solver::halo

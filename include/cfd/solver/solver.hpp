@@ -1,6 +1,13 @@
 // Composition root of one solver run.
-// EOS, FluxPolicy, and ReconPolicy are compile-time policy types (fully inlined);
-// all memory allocation is zero-overhead SoA via FieldsManager and FieldsView.
+// EOS, FluxPolicy, ReconPolicy and TimePolicy are compile-time policy types
+// (fully inlined); all memory allocation is zero-overhead SoA via FieldsManager
+// and FieldsView. State updates run through generic per-variable update blocks
+// (fields::block_*), so the time integrator is agnostic to the equation system
+// size — physics-module variables will append to the same blocks.
+//
+// The Solver doubles as the residual OPERATOR handed to TimePolicy::advance
+// (public interface: evaluate_residual / compute_dt / *_slots / alpha /
+// n_owned / ping_pong).
 #pragma once
 
 #include <mpi.h>
@@ -11,6 +18,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <memory>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -31,12 +39,17 @@
 #include "cfd/solver/halo.hpp"
 #include "cfd/solver/reconstruction/reconstruction.hpp"
 #include "cfd/solver/residual_kernel.hpp"
+#include "cfd/solver/time/time_policy.hpp"
 
 namespace cfd::solver {
 
-template <eos::EquationOfState EOS, typename FluxPolicy, recon::ReconstructionPolicy ReconPolicy>
+template <eos::EquationOfState EOS, typename FluxPolicy, recon::ReconstructionPolicy ReconPolicy,
+          template <typename> class TimePolicyT>
 class Solver {
 public:
+    // Concrete time policy bound to this solver instantiation. The injected
+    // class name completes TimePolicyT<Solver> without circular instantiation.
+    using TimePolicy = TimePolicyT<Solver>;
     Solver(const SolverConfig& cfg,
            const BoundaryConfig& bcfg,
            const EOS eos,
@@ -62,20 +75,19 @@ public:
 
         allocate_fields(n_total);
 
-        // 3. Build fast non-owning Views
+        // 3. Build fast non-owning Views and the update-block slot registry
         bind_views();
 
-        // 4. Allocate step metrics
+        // 4. Register the stable SoA views with the aggregated halo engine
+        //    (single message per neighbour per phase, extensible by modules)
+        register_halo_payloads();
+
+        // 5. Allocate step metrics
         lam_.resize(n_cells, 0.0);
-        inv_vol_.resize(n_own, 0.0);
         dt_.resize(n_own, 0.0);
         alpha_.resize(n_own, 0.0);
 
-        for (std::size_t c = 0; c < n_own; ++c) {
-            inv_vol_[c] = 1.0 / mp_.cell_volume[c];
-        }
-
-        // 5. Gradient method + reconstruction geometry (mesh-fixed)
+        // 6. Gradient method + reconstruction geometry (mesh-fixed)
         if constexpr (ReconPolicy::kNeedsGradients) {
             adjacency_ = gradient::build_vertex_adjacency(mp_);
             grad_method_ = std::make_unique<gradient::LsqGradient>(mp_, adjacency_);
@@ -84,6 +96,9 @@ public:
     }
 
     int run() {
+        static_assert(time::TimeIntegrationPolicy<TimePolicy>,
+                      "time policy must satisfy the time::TimeIntegrationPolicy concept");
+
         init_fields();
         const double wall0 = MPI_Wtime();
 
@@ -94,65 +109,55 @@ public:
         mpi::log_info("solver: flux=%s recon=%s limiter=%s scheme=%s cfl=%.3f max_iter=%lld",
                       FluxPolicy::name(), ReconPolicy::name(),
                       ReconPolicy::limiter_name(),
-                      cfg_.scheme == TimeScheme::SspRk3 ? "SSP_RK3" : "FORWARD_EULER",
+                      TimePolicy::name(),
                       cfg_.cfl, static_cast<long long>(cfg_.max_iterations));
 
         for (long long iter = 1; iter <= cfg_.max_iterations; ++iter) {
             last_iter = iter;
 
-            if (cfg_.scheme == TimeScheme::ForwardEuler) {
-                evaluate_residual(u_view_);
-                compute_dt();
-                sub_axpy_owned(stage_view_, u_view_, alpha_.data(), res_view_);
-                std::swap(u_view_, stage_view_);
-            } else {
-                // SSP-RK3 (Shu-Osher 3-stage TVD Runge-Kutta)
-                // Stage 1: u(1) = u^n - dt/V * R(u^n)
-                evaluate_residual(u_view_);
-                compute_dt();
-                copy_owned(prev_view_, u_view_);
-                sub_axpy_owned(stage_view_, u_view_, alpha_.data(), res_view_);
+            // --- One full time step (all update blocks) ---
+            time_.advance(*this);
 
-                // Stage 2: u(2) = 3/4 u^n + 1/4 (u(1) - dt/V * R(u(1)))
-                evaluate_residual(stage_view_);
-                ssp_combine(u_view_, 0.75, prev_view_, 0.25, stage_view_, alpha_.data(), res_view_);
+            // --- Diagnostics & convergence ---
+            // The global L2 reduction runs only every residual_interval
+            // iterations (plus the first and the last): per-iteration
+            // collectives would cap strong scaling at high rank counts.
+            const bool diagnose = iter == 1
+                               || iter % cfg_.residual_interval == 0
+                               || iter == cfg_.max_iterations;
 
-                // Stage 3: u^{n+1} = 1/3 u^n + 2/3 (u(2) - dt/V * R(u(2)))
-                evaluate_residual(u_view_);
-                ssp_combine(stage_view_, 1.0 / 3.0, prev_view_, 2.0 / 3.0, u_view_, alpha_.data(), res_view_);
-                std::swap(u_view_, stage_view_);
-            }
-
-            // --- Diagnostics & Convergence ---
-            std::array<double, eos::kNumVars> l2{};
-            residual_norms(l2);
-
-            if (!std::isfinite(l2[0])) {
-                mpi::log_warn_rank("solver: non-finite residual detected, dumping state");
-                write_fields("blowup");
-                return 1;
-            }
-
+            bool converged = false;
             double rel = 1.0;
-            if (!have_norm0) {
-                norm0 = l2;
-                have_norm0 = true;
-            } else {
-                rel = relative_residual(l2, norm0);
-            }
+            if (diagnose) {
+                std::array<double, eos::kNumVars> l2{};
+                residual_norms(l2);
 
-            if (iter == 1 || iter % cfg_.residual_interval == 0) {
+                if (!std::isfinite(l2[0])) {
+                    mpi::log_warn_rank("solver: non-finite residual detected, dumping state");
+                    write_fields("blowup");
+                    return 1;
+                }
+
+                if (!have_norm0) {
+                    norm0 = l2;
+                    have_norm0 = true;
+                } else {
+                    rel = relative_residual(l2, norm0);
+                }
+
                 log_progress(iter, MPI_Wtime() - wall0, l2, rel);
                 if (g_verbose >= 1) {
                     log_boundary_integrals();
                 }
+
+                converged = rel <= cfg_.residual_tolerance;
             }
 
             if (cfg_.field_interval > 0 && iter % cfg_.field_interval == 0) {
                 write_fields(make_stem("iter", iter));
             }
 
-            if (rel <= cfg_.residual_tolerance) {
+            if (converged) {
                 mpi::log_info("solver: converged at iteration %lld (rel=%.3e)", iter, rel);
                 break;
             }
@@ -164,17 +169,23 @@ public:
         return 0;
     }
 
-private:
-    // --- Residual Evaluation Pipeline ---------------------------------------
+    // --- Residual Operator interface (consumed by TimePolicy) ----------------
 
-    void evaluate_residual(fields::ConservativeView<double> u) noexcept {
+    /**
+     * @brief Evaluates the full residual pipeline R(state) for the given
+     *        update-block state slots (u or a stage buffer).
+     */
+    void evaluate_residual(const std::span<double* const> state) noexcept {
         const std::size_t n_own = static_cast<std::size_t>(mp_.n_own);
 
         // 1. Owned conservative states -> primitives
+        const double* CFD_RESTRICT s0 = state[0];
+        const double* CFD_RESTRICT s1 = state[1];
+        const double* CFD_RESTRICT s2 = state[2];
+        const double* CFD_RESTRICT s3 = state[3];
+        const double* CFD_RESTRICT s4 = state[4];
         for (std::size_t c = 0; c < n_own; ++c) {
-            const double U_c[eos::kNumVars] = {
-                u.rho[c], u.rhou[c], u.rhov[c], u.rhow[c], u.rhoE[c]
-            };
+            const double U_c[eos::kNumVars] = {s0[c], s1[c], s2[c], s3[c], s4[c]};
             eos::conserved_to_primitives_pT(eos_, U_c,
                                             q_view_.prs[c], q_view_.vx[c],
                                             q_view_.vy[c], q_view_.vz[c],
@@ -182,7 +193,7 @@ private:
         }
 
         // 2. MPI halo exchange on primitives (ghost cells, one hop)
-        halo_.exchange(q_view_);
+        halo_.exchange_fields();
 
         // 3. Boundary condition ghosts on the primitive fields
         bcs_.apply_all(q_view_, mp_);
@@ -194,7 +205,7 @@ private:
             ReconPolicy::compute_limiters(mp_, q_view_.as_const(),
                                           grad_view_.as_const(), adjacency_,
                                           geom_, phi_view_);
-            halo_.exchange_grad_limiter(grad_view_, phi_view_);
+            halo_.exchange_grad_limiters();
         }
 
         // 5. Numerical flux sweeps on the reconstructed primitive states
@@ -210,66 +221,29 @@ private:
         double* CFD_RESTRICT alpha     = alpha_.data();
 
         for (std::size_t c = 0; c < n_own; ++c) {
-            const double l = std::max(lam[c], 1.0e-14);
+            const double l = std::max(lam[c], constants::kSpectralRadiusFloor);
             dt[c]    = cfg_.cfl * vol[c] / l;
             alpha[c] = cfg_.cfl / l;
         }
     }
 
-    // --- High-Performance Owned Field Vector Algebra -----------------------
+    // --- Update-block slots (mean-flow components today, module vars later) ---
 
-    static void copy_owned(fields::ConservativeView<double>& dst,
-                           const fields::ConservativeView<const double>& src,
-                           const std::size_t n_own) noexcept {
-        std::copy(src.rho,  src.rho  + n_own, dst.rho);
-        std::copy(src.rhou, src.rhou + n_own, dst.rhou);
-        std::copy(src.rhov, src.rhov + n_own, dst.rhov);
-        std::copy(src.rhow, src.rhow + n_own, dst.rhow);
-        std::copy(src.rhoE, src.rhoE + n_own, dst.rhoE);
+    [[nodiscard]] std::span<double* const> u_slots() noexcept { return u_slots_; }
+    [[nodiscard]] std::span<double* const> stage_slots() noexcept { return stage_slots_; }
+    [[nodiscard]] std::span<double* const> prev_slots() noexcept { return prev_slots_; }
+    [[nodiscard]] std::span<double* const> res_slots() noexcept { return res_slots_; }
+
+    [[nodiscard]] const double* alpha() const noexcept { return alpha_.data(); }
+    [[nodiscard]] std::size_t n_owned() const noexcept {
+        return static_cast<std::size_t>(mp_.n_own);
     }
 
-    void copy_owned(fields::ConservativeView<double>& dst,
-                    const fields::ConservativeView<double>& src) const noexcept {
-        const auto n_own = static_cast<std::size_t>(mp_.n_own);
-        copy_owned(dst, src.as_const(), n_own);
-    }
+    /** @brief Swaps the primary and stage state slots (ping-pong buffers). */
+    void ping_pong() noexcept { std::swap(u_slots_, stage_slots_); }
 
-    // dst = x - alpha * r
-    void sub_axpy_owned(fields::ConservativeView<double>& dst,
-                        const fields::ConservativeView<double>& x,
-                        const double* CFD_RESTRICT alpha,
-                        const fields::ResidualView<double>& r) const noexcept {
-        const std::size_t n_own = static_cast<std::size_t>(mp_.n_own);
-        for (std::size_t c = 0; c < n_own; ++c) {
-            const double a = alpha[c];
-            dst.rho[c]  = x.rho[c]  - a * r.res1[c];
-            dst.rhou[c] = x.rhou[c] - a * r.res2[c];
-            dst.rhov[c] = x.rhov[c] - a * r.res3[c];
-            dst.rhow[c] = x.rhow[c] - a * r.res4[c];
-            dst.rhoE[c] = x.rhoE[c] - a * r.res5[c];
-        }
-    }
-
-    // dst = c1 * x + c2 * (y - alpha * r)
-    void ssp_combine(fields::ConservativeView<double>& dst,
-                     const double c1,
-                     const fields::ConservativeView<double>& x,
-                     const double c2,
-                     const fields::ConservativeView<double>& y,
-                     const double* CFD_RESTRICT alpha,
-                     const fields::ResidualView<double>& r) const noexcept {
-        const auto n_own = static_cast<std::size_t>(mp_.n_own);
-        for (std::size_t c = 0; c < n_own; ++c) {
-            const double a = alpha[c];
-            dst.rho[c]  = c1 * x.rho[c]  + c2 * (y.rho[c]  - a * r.res1[c]);
-            dst.rhou[c] = c1 * x.rhou[c] + c2 * (y.rhou[c] - a * r.res2[c]);
-            dst.rhov[c] = c1 * x.rhov[c] + c2 * (y.rhov[c] - a * r.res3[c]);
-            dst.rhow[c] = c1 * x.rhow[c] + c2 * (y.rhow[c] - a * r.res4[c]);
-            dst.rhoE[c] = c1 * x.rhoE[c] + c2 * (y.rhoE[c] - a * r.res5[c]);
-        }
-    }
-
-    // --- Memory Allocation & Binding ----------------------------------------
+private:
+    // --- Memory Allocation, Views & Slot Binding ------------------------------
 
     void allocate_fields(const std::size_t n_total) {
         // Primary State U & Q
@@ -308,8 +282,8 @@ private:
             mgr_.add_field<double>("phi_tmp", n_total, fields::FieldLocation::Cell);
         }
 
-        // RK3 Previous Snapshot
-        if (cfg_.scheme == TimeScheme::SspRk3) {
+        // RK scratch: stage buffer always, u^n snapshot only for multistage schemes
+        if constexpr (TimePolicy::kNeedsPrevSnapshot) {
             mgr_.add_field<double>("prev_rho",  n_total, fields::FieldLocation::Cell);
             mgr_.add_field<double>("prev_rhou", n_total, fields::FieldLocation::Cell);
             mgr_.add_field<double>("prev_rhov", n_total, fields::FieldLocation::Cell);
@@ -317,7 +291,6 @@ private:
             mgr_.add_field<double>("prev_rhoE", n_total, fields::FieldLocation::Cell);
         }
 
-        // Scratch / stage buffer
         mgr_.add_field<double>("stage_rho",  n_total, fields::FieldLocation::Cell);
         mgr_.add_field<double>("stage_rhou", n_total, fields::FieldLocation::Cell);
         mgr_.add_field<double>("stage_rhov", n_total, fields::FieldLocation::Cell);
@@ -326,14 +299,6 @@ private:
     }
 
     void bind_views() {
-        u_view_ = {
-            mgr_.get_required_field_ptr<double>("rho"),
-            mgr_.get_required_field_ptr<double>("rhou"),
-            mgr_.get_required_field_ptr<double>("rhov"),
-            mgr_.get_required_field_ptr<double>("rhow"),
-            mgr_.get_required_field_ptr<double>("rhoE")
-        };
-
         q_view_ = {
             mgr_.get_required_field_ptr<double>("prs"),
             mgr_.get_required_field_ptr<double>("vx"),
@@ -350,7 +315,18 @@ private:
             mgr_.get_required_field_ptr<double>("res5")
         };
 
-        stage_view_ = {
+        // Update-block slots: one entry per solvable variable per role. The
+        // u/stage vectors are swapped by ping_pong(); u_view() always reflects
+        // the current primary state.
+        u_slots_ = {
+            mgr_.get_required_field_ptr<double>("rho"),
+            mgr_.get_required_field_ptr<double>("rhou"),
+            mgr_.get_required_field_ptr<double>("rhov"),
+            mgr_.get_required_field_ptr<double>("rhow"),
+            mgr_.get_required_field_ptr<double>("rhoE")
+        };
+
+        stage_slots_ = {
             mgr_.get_required_field_ptr<double>("stage_rho"),
             mgr_.get_required_field_ptr<double>("stage_rhou"),
             mgr_.get_required_field_ptr<double>("stage_rhov"),
@@ -358,8 +334,8 @@ private:
             mgr_.get_required_field_ptr<double>("stage_rhoE")
         };
 
-        if (cfg_.scheme == TimeScheme::SspRk3) {
-            prev_view_ = {
+        if constexpr (TimePolicy::kNeedsPrevSnapshot) {
+            prev_slots_ = {
                 mgr_.get_required_field_ptr<double>("prev_rho"),
                 mgr_.get_required_field_ptr<double>("prev_rhou"),
                 mgr_.get_required_field_ptr<double>("prev_rhov"),
@@ -367,6 +343,14 @@ private:
                 mgr_.get_required_field_ptr<double>("prev_rhoE")
             };
         }
+
+        res_slots_ = {
+            mgr_.get_required_field_ptr<double>("res1"),
+            mgr_.get_required_field_ptr<double>("res2"),
+            mgr_.get_required_field_ptr<double>("res3"),
+            mgr_.get_required_field_ptr<double>("res4"),
+            mgr_.get_required_field_ptr<double>("res5")
+        };
 
         if constexpr (ReconPolicy::kNeedsGradients) {
             const std::size_t n_total = mgr_.get_field_size("rho");
@@ -388,6 +372,31 @@ private:
         }
     }
 
+    /** @brief Conservative view of the current primary state (5 mean-flow vars). */
+    [[nodiscard]] fields::ConservativeView<double> u_view() const noexcept {
+        return {u_slots_[0], u_slots_[1], u_slots_[2], u_slots_[3], u_slots_[4]};
+    }
+
+    void register_halo_payloads() {
+        // Mean-flow primitives join the aggregated fields phase
+        std::array<double*, 5> q_fields = {
+            q_view_.prs, q_view_.vx, q_view_.vy, q_view_.vz, q_view_.tmp
+        };
+        halo_.register_cell_fields(q_fields);
+
+        // Mean-flow gradients + limiters join the aggregated gradient phase
+        if constexpr (ReconPolicy::kNeedsGradients) {
+            std::array<double*, 5> grad_bases = {
+                grad_view_.prs_grad, grad_view_.vx_grad, grad_view_.vy_grad,
+                grad_view_.vz_grad, grad_view_.tmp_grad
+            };
+            std::array<double*, 5> lims = {
+                phi_view_.prs, phi_view_.vx, phi_view_.vy, phi_view_.vz, phi_view_.tmp
+            };
+            halo_.register_grad_limiters(grad_bases, grad_view_.stride, lims);
+        }
+    }
+
     void init_fields() {
         double U[eos::kNumVars];
         eos::primitives_rhop_to_conserved(eos_,
@@ -398,13 +407,14 @@ private:
                                           cfg_.init_p,
                                           U);
 
+        auto u = u_view();
         const std::size_t n_total = mgr_.get_field_size("rho");
         for (std::size_t c = 0; c < n_total; ++c) {
-            u_view_.rho[c]  = U[0];
-            u_view_.rhou[c] = U[1];
-            u_view_.rhov[c] = U[2];
-            u_view_.rhow[c] = U[3];
-            u_view_.rhoE[c] = U[4];
+            u.rho[c]  = U[0];
+            u.rhou[c] = U[1];
+            u.rhov[c] = U[2];
+            u.rhow[c] = U[3];
+            u.rhoE[c] = U[4];
         }
     }
 
@@ -433,7 +443,7 @@ private:
                                      const std::array<double, eos::kNumVars>& norm0) noexcept {
         double rel = 0.0;
         for (std::size_t v = 0; v < l2.size(); ++v) {
-            rel = std::max(rel, l2[v] / std::max(norm0[v], 1.0e-300));
+            rel = std::max(rel, l2[v] / std::max(norm0[v], constants::kResidualNormFloor));
         }
         return rel;
     }
@@ -455,17 +465,18 @@ private:
 
     void refresh_primitives_for_audit() {
         const auto n_own = static_cast<std::size_t>(mp_.n_own);
+        auto u = u_view();
 
         for (std::size_t c = 0; c < n_own; ++c) {
             const double U_c[eos::kNumVars] = {
-                u_view_.rho[c], u_view_.rhou[c], u_view_.rhov[c], u_view_.rhow[c], u_view_.rhoE[c]
+                u.rho[c], u.rhou[c], u.rhov[c], u.rhow[c], u.rhoE[c]
             };
             eos::conserved_to_primitives_pT(eos_, U_c,
                                             q_view_.prs[c], q_view_.vx[c],
                                             q_view_.vy[c], q_view_.vz[c],
                                             q_view_.tmp[c]);
         }
-        halo_.exchange(q_view_);
+        halo_.exchange_fields();
         bcs_.apply_all(q_view_, mp_);
 
         if constexpr (ReconPolicy::kNeedsGradients) {
@@ -510,9 +521,10 @@ private:
         const auto n_own = static_cast<std::size_t>(mp_.n_own);
         std::vector<double> rho(n_own), vx(n_own), vy(n_own), vz(n_own), pr(n_own), mach(n_own);
 
+        const auto u = u_view();
         for (std::size_t c = 0; c < n_own; ++c) {
             const double U[eos::kNumVars] = {
-                u_view_.rho[c], u_view_.rhou[c], u_view_.rhov[c], u_view_.rhow[c], u_view_.rhoE[c]
+                u.rho[c], u.rhou[c], u.rhov[c], u.rhow[c], u.rhoE[c]
             };
             const double r = U[0];
             const double p = eos::pressure(eos_, U);
@@ -548,6 +560,7 @@ private:
     bc::BoundaryManager<EOS> bcs_;
     halo::HaloExchanger halo_;
     ResidualKernel<EOS, FluxPolicy, ReconPolicy> kernel_;
+    TimePolicy time_{};
     MPI_Comm comm_{MPI_COMM_WORLD};
 
     gradient::VertexAdjacency adjacency_;
@@ -555,13 +568,16 @@ private:
     typename ReconPolicy::Geometry geom_;
 
     fields::FieldsManager mgr_;
-    fields::ConservativeView<double> u_view_{};
     fields::PrimitiveView<double> q_view_{};
     fields::ResidualView<double> res_view_{};
-    fields::ConservativeView<double> prev_view_{};
-    fields::ConservativeView<double> stage_view_{};
     fields::PrimitiveGradView<double> grad_view_{};
     fields::PrimitiveView<double> phi_view_{};
+
+    // Update-block slot registry: [variable][role] pointer table
+    std::vector<double*> u_slots_;
+    std::vector<double*> prev_slots_;
+    std::vector<double*> stage_slots_;
+    std::vector<double*> res_slots_;
 
     std::vector<double> lam_;     ///< Per-cell spectral radius [0, n_cells)
     std::vector<double> inv_vol_; ///< 1.0 / cell_volume [0, n_own)

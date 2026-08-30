@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "cfd/core/types.hpp"
 #include "cfd/mesh/localmesh.hpp"
 #include "cfd/solver/eos/ideal_gas.hpp"
 #include "cfd/solver/bc/bc.hpp"
@@ -26,8 +27,8 @@ struct BCDescriptor {
     int patch_id = -1;
 
     // pressure and temperature
-    double p{101325.0};
-    double t{288.15};
+    double p{constants::kIsaPressure};
+    double t{constants::kIsaTemperature};
     double tmp_grad{0.0}; ///< Normal temperature gradient dT/dn [K/m]
 
     // velocity vector
@@ -59,8 +60,8 @@ struct EqOfStateConfig {
     EqOfStateType type = EqOfStateType::IdealGas;
 
     // Ideal gas parameters
-    double gamma = 1.4;
-    double gas_constant = 287.052874;
+    double gamma = constants::kAirGamma;
+    double gas_constant = constants::kAirGasConstant;
 
     [[nodiscard]] eos::IdealGas create_ideal_gas() const noexcept {
         return eos::IdealGas{gamma, gas_constant};
@@ -98,8 +99,8 @@ struct SolverConfig {
     EqOfStateConfig flow;
 
     // [initial] — uniform freestream state
-    double init_rho = 1.225;
-    double init_p = 101325.0;
+    double init_rho = constants::kIsaDensity;
+    double init_p = constants::kIsaPressure;
     std::array<double, 3> init_velocity = {0.0, 0.0, 0.0};
 
     // [numerics]

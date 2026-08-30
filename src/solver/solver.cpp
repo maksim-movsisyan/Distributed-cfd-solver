@@ -7,8 +7,32 @@
 #include "cfd/solver/reconstruction/muscl.hpp"
 #include "cfd/solver/reconstruction/muscl_directional.hpp"
 #include "cfd/solver/riemann/hllc.hpp"
+#include "cfd/solver/time/forward_euler.hpp"
+#include "cfd/solver/time/ssp_rk3.hpp"
 
 namespace cfd::solver {
+
+// dispatch time integration scheme
+template <typename EosType, typename FluxType, typename ReconType>
+int dispatch_time_scheme(const SolverConfig& cfg,
+                         const BoundaryConfig& bcfg,
+                         const mesh::MeshPart& mp,
+                         const MPI_Comm comm,
+                         const EosType& eos) {
+    switch (cfg.scheme) {
+        case TimeScheme::ForwardEuler:
+            return Solver<EosType, FluxType, ReconType, time::ForwardEuler>(
+                cfg, bcfg, eos, mp, comm).run();
+
+        case TimeScheme::SspRk3:
+            return Solver<EosType, FluxType, ReconType, time::SspRk3>(
+                cfg, bcfg, eos, mp, comm).run();
+
+        default:
+            mpi::fatal(comm, "dispatch: unknown time scheme");
+            return 1;
+    }
+}
 
 // dispatch multidim limiter type
 template <typename EosType, typename FluxType, template <typename> class MultidimRecon>
@@ -19,16 +43,16 @@ int dispatch_multidim_limiter(const SolverConfig& cfg,
                               const EosType& eos) {
     switch (cfg.limiter) {
         case LimiterType::Venkatakrishnan:
-            return Solver<EosType, FluxType, MultidimRecon<limiter::Venkatakrishnan>>(
-                cfg, bcfg, eos, mp, comm).run();
+            return dispatch_time_scheme<EosType, FluxType, MultidimRecon<limiter::Venkatakrishnan>>(
+                cfg, bcfg, mp, comm, eos);
 
         case LimiterType::BarthJespersen:
-            return Solver<EosType, FluxType, MultidimRecon<limiter::BarthJespersen>>(
-                cfg, bcfg, eos, mp, comm).run();
+            return dispatch_time_scheme<EosType, FluxType, MultidimRecon<limiter::BarthJespersen>>(
+                cfg, bcfg, mp, comm, eos);
 
         case LimiterType::VanAlbada:
-            return Solver<EosType, FluxType, MultidimRecon<limiter::VanAlbada>>(
-                cfg, bcfg, eos, mp, comm).run();
+            return dispatch_time_scheme<EosType, FluxType, MultidimRecon<limiter::VanAlbada>>(
+                cfg, bcfg, mp, comm, eos);
 
         default:
             mpi::fatal(comm, "dispatch: invalid multidimensional limiter type");
@@ -39,18 +63,18 @@ int dispatch_multidim_limiter(const SolverConfig& cfg,
 // dispatch 1d limiter type
 template <typename EosType, typename FluxType, template <typename> class DirectionalRecon>
 int dispatch_directional_limiter(const SolverConfig& cfg,
-                                const BoundaryConfig& bcfg,
-                                const mesh::MeshPart& mp,
-                                const MPI_Comm comm,
-                                const EosType& eos) {
+                                 const BoundaryConfig& bcfg,
+                                 const mesh::MeshPart& mp,
+                                 const MPI_Comm comm,
+                                 const EosType& eos) {
     switch (cfg.limiter) {
         case LimiterType::Minmod1D:
-            return Solver<EosType, FluxType, DirectionalRecon<limiter::Minmod1D>>(
-                cfg, bcfg, eos, mp, comm).run();
+            return dispatch_time_scheme<EosType, FluxType, DirectionalRecon<limiter::Minmod1D>>(
+                cfg, bcfg, mp, comm, eos);
 
         case LimiterType::VanAlbada1D:
-            return Solver<EosType, FluxType, DirectionalRecon<limiter::VanAlbada1D>>(
-                cfg, bcfg, eos, mp, comm).run();
+            return dispatch_time_scheme<EosType, FluxType, DirectionalRecon<limiter::VanAlbada1D>>(
+                cfg, bcfg, mp, comm, eos);
 
         default:
             mpi::fatal(comm, "dispatch: invalid directional 1D limiter type");
@@ -67,8 +91,8 @@ int dispatch_reconstruction(const SolverConfig& cfg,
                             const EosType& eos) {
     switch (cfg.reconstruction) {
         case ReconType::FirstOrder:
-            return Solver<EosType, FluxType, recon::FirstOrder>(
-                cfg, bcfg, eos, mp, comm).run();
+            return dispatch_time_scheme<EosType, FluxType, recon::FirstOrder>(
+                cfg, bcfg, mp, comm, eos);
 
         case ReconType::Muscl:
             return dispatch_multidim_limiter<EosType, FluxType, recon::Muscl>(

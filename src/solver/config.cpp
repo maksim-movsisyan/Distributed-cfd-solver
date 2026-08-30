@@ -505,7 +505,7 @@ BoundaryConfig parse_boundary_config(const std::string& path,
             } else if (t->contains("t")) {
                 d.t = req_number(*t, "t", ctx, comm);
             } else {
-                d.t = 288.15; // default isothermal wall temperature
+                d.t = constants::kIsaTemperature; // default isothermal wall temperature
             }
             check_positive(d.t, "t", ctx, comm);
 
@@ -537,7 +537,7 @@ BoundaryConfig parse_boundary_config(const std::string& path,
             d.type = bc::BCType::SubsonicInlet;
             if (!t->contains("p") && !t->contains("p_inf")) {
                 // fictious pressure for parse_inflow_descriptor
-                const_cast<toml::table*>(t)->insert_or_assign("p", 101325.0);
+                const_cast<toml::table*>(t)->insert_or_assign("p", constants::kIsaPressure);
             }
             parse_inflow_descriptor(*t, d, ctx, comm);
             

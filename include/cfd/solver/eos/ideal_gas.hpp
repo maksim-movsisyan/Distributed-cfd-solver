@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cmath>
+
+#include "cfd/core/types.hpp"
 #include "cfd/solver/eos/eos_concept.hpp"
 
 namespace cfd::solver::eos {
@@ -9,8 +11,8 @@ namespace cfd::solver::eos {
 // Ideal Gas Policy (Calorically Perfect Gas)
 // ============================================================================
 struct IdealGas {
-    double gamma_val = 1.4;        // Ratio of specific heats [-]
-    double R_val = 287.052874;     // Specific gas constant [J / (kg K)]
+    double gamma_val = constants::kAirGamma;        // Ratio of specific heats [-]
+    double R_val = constants::kAirGasConstant;      // Specific gas constant [J / (kg K)]
 
     [[nodiscard]] static constexpr const char* name() noexcept { return "IDEAL_GAS"; }
 

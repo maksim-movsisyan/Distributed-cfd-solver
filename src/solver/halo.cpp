@@ -16,6 +16,7 @@ namespace {
 
 constexpr int kFieldTag       = 4242;
 constexpr int kGradLimiterTag = 4243;
+constexpr int kOnceTag        = 4244;
 constexpr std::size_t kMaxStackVars = 64;
 constexpr std::int64_t kMpiCountLimit = 0x7FFFFFFFLL;
 
@@ -312,6 +313,21 @@ void HaloExchanger::finish_exchange_grad_limiters() {
 void HaloExchanger::exchange_grad_limiters() {
     start_exchange_grad_limiters();
     finish_exchange_grad_limiters();
+}
+
+void HaloExchanger::exchange_once(std::span<double* const> fields) {
+    if (nb_ranks_.empty() || fields.empty()) return;
+
+    // Transient phase reusing the standard pack/post/unpack engine
+    PhaseData once;
+    once.tag = kOnceTag;
+    once.ptrs.assign(fields.begin(), fields.end());
+    resize_phase(once, "one-off");
+
+    post_irecvs(once);
+    pack_and_isend(once);
+    MPI_Waitall(static_cast<int>(once.requests.size()), once.requests.data(), MPI_STATUSES_IGNORE);
+    unpack_ghosts(once);
 }
 
 } // namespace cfd::solver::halo

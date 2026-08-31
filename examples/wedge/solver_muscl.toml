@@ -4,6 +4,7 @@
 #   rho = 1.1768292 kg/m^3, a = 347.2216 m/s, |u| = 1041.0 m/s
 
 [flow]
+flow_model = "INVISCID_FLOW"
 eos = "IDEAL_GAS"
 gamma = 1.4
 gas_constant = 287.052874

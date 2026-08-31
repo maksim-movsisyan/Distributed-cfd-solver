@@ -1,17 +1,16 @@
 #pragma once
 
+#include "cfd/core/types.hpp"
 #include "cfd/solver/eos/eos_concept.hpp"
 
 namespace cfd::solver::eos {
-
-constexpr int kNumVars = 5;
 
 // ============================================================================
 // Conserved State Decompositions U = [rho, rho*u, rho*v, rho*w, E]^T
 // ============================================================================
 
 // Extract specific internal energy e = (E - 0.5 * rho * |v|^2) / rho [J / kg]
-[[nodiscard]] inline double specific_internal_energy(const double U[kNumVars]) noexcept {
+[[nodiscard]] inline double specific_internal_energy(const double U[constants::kNumVars]) noexcept {
     const double rho = U[0];
     const double inv_rho = 1.0 / rho;
     const double q2 = (U[1] * U[1] + U[2] * U[2] + U[3] * U[3]) * (inv_rho * inv_rho);
@@ -20,7 +19,7 @@ constexpr int kNumVars = 5;
 
 // Static pressure from conserved state: p = p(rho, e) [Pa]
 template <EquationOfState EOS>
-[[nodiscard]] inline double pressure(const EOS& eos, const double U[kNumVars]) noexcept {
+[[nodiscard]] inline double pressure(const EOS& eos, const double U[constants::kNumVars]) noexcept {
     const double rho = U[0];
     const double e = specific_internal_energy(U);
     return eos.pressure_rhoe(rho, e);
@@ -28,7 +27,7 @@ template <EquationOfState EOS>
 
 // Static temperature from conserved state: T = T(rho, e) [K]
 template <EquationOfState EOS>
-[[nodiscard]] inline double temperature(const EOS& eos, const double U[kNumVars]) noexcept {
+[[nodiscard]] inline double temperature(const EOS& eos, const double U[constants::kNumVars]) noexcept {
     const double rho = U[0];
     const double e = specific_internal_energy(U);
     return eos.temperature_rhoe(rho, e);
@@ -36,7 +35,7 @@ template <EquationOfState EOS>
 
 // Speed of sound from conserved state: a = a(rho, p) [m / s]
 template <EquationOfState EOS>
-[[nodiscard]] inline double sound_speed(const EOS& eos, const double U[kNumVars]) noexcept {
+[[nodiscard]] inline double sound_speed(const EOS& eos, const double U[constants::kNumVars]) noexcept {
     const double rho = U[0];
     const double p = pressure(eos, U);
     return eos.sound_speed_rhop(rho, p);
@@ -44,7 +43,7 @@ template <EquationOfState EOS>
 
 // Total specific enthalpy H = (E + p) / rho [J / kg]
 template <EquationOfState EOS>
-[[nodiscard]] inline double total_enthalpy(const EOS& eos, const double U[kNumVars]) noexcept {
+[[nodiscard]] inline double total_enthalpy(const EOS& eos, const double U[constants::kNumVars]) noexcept {
     const double p = pressure(eos, U);
     return (U[4] + p) / U[0];
 }
@@ -56,7 +55,7 @@ template <EquationOfState EOS>
 // Conserved state U -> Primitive tuple (rho, u, v, w, p)
 template <EquationOfState EOS>
 inline void conserved_to_primitives_rhop(const EOS& eos,
-                                         const double U[kNumVars],
+                                         const double U[constants::kNumVars],
                                          double& rho, double& u,
                                          double& v, double& w,
                                          double& p) noexcept {
@@ -74,7 +73,7 @@ inline void conserved_to_primitives_rhop(const EOS& eos,
 // Conserved state U -> Primitive tuple (p, u, v, w, T)
 template <EquationOfState EOS>
 inline void conserved_to_primitives_pT(const EOS& eos,
-                                       const double U[kNumVars],
+                                       const double U[constants::kNumVars],
                                        double& p, double& u,
                                        double& v, double& w,
                                        double& T) noexcept {
@@ -100,7 +99,7 @@ inline void primitives_rhop_to_conserved(const EOS& eos,
                                          const double rho, const double u,
                                          const double v, const double w,
                                          const double p,
-                                         double U[kNumVars]) noexcept {
+                                         double U[constants::kNumVars]) noexcept {
     const double T = eos.temperature_rhop(rho, p);
     const double e = eos.internal_energy_Tp(T, p);
     const double ke = 0.5 * rho * (u * u + v * v + w * w);
@@ -118,7 +117,7 @@ inline void primitives_pT_to_conserved(const EOS& eos,
                                        const double p, const double u,
                                        const double v, const double w,
                                        const double T,
-                                       double U[kNumVars]) noexcept {
+                                       double U[constants::kNumVars]) noexcept {
     const double rho = eos.density_Tp(T, p);
     const double e = eos.internal_energy_Tp(T, p);
     const double ke = 0.5 * rho * (u * u + v * v + w * w);

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "cfd/core/types.hpp"
 #include "cfd/solver/eos/state_conversions.hpp"
 
 namespace cfd::solver::riemann {
@@ -18,13 +19,13 @@ struct HllcFlux {
     // and returns max wave speed estimate smax for local CFL time stepping.
     template <eos::EquationOfState EOS>
     static inline void face_flux(const EOS& eos,
-                                 const double UL[eos::kNumVars],
-                                 const double UR[eos::kNumVars],
+                                 const double UL[constants::kNumVars],
+                                 const double UR[constants::kNumVars],
                                  const double nx,
                                  const double ny,
                                  const double nz,
                                  const double area,
-                                 double F[eos::kNumVars],
+                                 double F[constants::kNumVars],
                                  double& smax) noexcept {
         // --- 1. Primitive reconstruction & Fast Inverses ---
         const double rhoL = UL[0];
@@ -84,7 +85,7 @@ struct HllcFlux {
         // --- 4. Branching & Lazy Flux Evaluation ---
         if (SM >= 0.0) {
             // Left state or Left Star state
-            const double FL[eos::kNumVars] = {
+            const double FL[constants::kNumVars] = {
                 rhoL * unL,
                 rhoL * uLx * unL + pL * nx,
                 rhoL * uLy * unL + pL * ny,
@@ -94,7 +95,7 @@ struct HllcFlux {
 
             if (SL >= 0.0) {
                 // Supersonic Left -> Right
-                for (int v = 0; v < eos::kNumVars; ++v) {
+                for (int v = 0; v < constants::kNumVars; ++v) {
                     F[v] = FL[v] * area;
                 }
             } else {
@@ -103,7 +104,7 @@ struct HllcFlux {
             }
         } else {
             // Right state or Right Star state
-            const double FR[eos::kNumVars] = {
+            const double FR[constants::kNumVars] = {
                 rhoR * unR,
                 rhoR * uRx * unR + pR * nx,
                 rhoR * uRy * unR + pR * ny,
@@ -113,7 +114,7 @@ struct HllcFlux {
 
             if (SR <= 0.0) {
                 // Supersonic Right -> Left
-                for (int v = 0; v < eos::kNumVars; ++v) {
+                for (int v = 0; v < constants::kNumVars; ++v) {
                     F[v] = FR[v] * area;
                 }
             } else {
@@ -124,8 +125,8 @@ struct HllcFlux {
     }
 
 private:
-    static inline void star_flux(const double UK[eos::kNumVars],
-                                 const double FK[eos::kNumVars],
+    static inline void star_flux(const double UK[constants::kNumVars],
+                                 const double FK[constants::kNumVars],
                                  const double rhoK,
                                  const double pK,
                                  const double ux,
@@ -139,10 +140,10 @@ private:
                                  const double ny,
                                  const double nz,
                                  const double area,
-                                 double F[eos::kNumVars]) noexcept {
+                                 double F[constants::kNumVars]) noexcept {
         const double den = SK - SM;
         if (std::fabs(den) < 1.0e-6 * (ak + std::fabs(SK))) {
-            for (int v = 0; v < eos::kNumVars; ++v) {
+            for (int v = 0; v < constants::kNumVars; ++v) {
                 F[v] = FK[v] * area;
             }
             return;
@@ -156,7 +157,7 @@ private:
         const double p_term = pK / (rhoK * d_wave);
         const double e_star = UK[4] + rhoK * d * (SM + p_term);
 
-        const double Ust[eos::kNumVars] = {
+        const double Ust[constants::kNumVars] = {
             q * rhoK,
             q * rhoK * (ux + d * nx),
             q * rhoK * (uy + d * ny),
@@ -164,7 +165,7 @@ private:
             q * e_star
         };
 
-        for (int v = 0; v < eos::kNumVars; ++v) {
+        for (int v = 0; v < constants::kNumVars; ++v) {
             F[v] = (FK[v] + SK * (Ust[v] - UK[v])) * area;
         }
     }

@@ -12,6 +12,7 @@
 #include <algorithm>
 
 namespace cfd::solver::limiter {
+// --- General TVD Limiters -------------------------------------------------
 
 /**
  * @brief Barth-Jespersen (1989): Strict TVD limiter, min(1, r).

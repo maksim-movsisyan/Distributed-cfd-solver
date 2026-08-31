@@ -26,6 +26,7 @@ public:
 
         fields::block_sub_axpy(op.stage_slots(), op.u_slots(), op.res_slots(),
                                op.alpha(), op.n_owned());
+        op.post_stage(op.stage_slots());
         op.ping_pong();
     }
 };

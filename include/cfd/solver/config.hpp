@@ -68,6 +68,11 @@ struct EqOfStateConfig {
     }
 };
 
+enum class FlowModel {
+    InviscidFlow,
+    ViscousFlow
+};
+
 // --- Numerics / time / output ------------------------------------------------
 
 enum class FluxType {
@@ -94,9 +99,24 @@ enum class LimiterType {
     VanAlbada1D
 };
 
+// --- Turbulence modelling ----------------------------------------------------
+
+struct TurbulenceConfig {
+    bool enabled = false;                 // selected via [turbulence] model = "SA"
+    double nu_inf_ratio = 3.0;            // freestream nu_tilde / nu_molecular [-]
+    int max_distance_sweeps = 500;        // wall-distance sweep budget
+    double distance_tolerance = 1.0e-8;   // wall-distance relative tolerance
+};
+
+enum class TurbulenceModel {
+    SA
+};
+
 struct SolverConfig {
     // [flow]
     EqOfStateConfig flow;
+    double prandtl = constants::kAirPrandtl;            // molecular Prandtl number
+    FlowModel flow_model;                               // InviscidFlow / ViscousFlow
 
     // [initial] — uniform freestream state
     double init_rho = constants::kIsaDensity;
@@ -107,7 +127,11 @@ struct SolverConfig {
     FluxType flux = FluxType::HLLC;
     ReconType reconstruction = ReconType::FirstOrder;
     LimiterType limiter = LimiterType::Venkatakrishnan;
-    double limiter_venkat_k = 0.5; // Venkatakrishnan smoothing coefficient
+    double limiter_venkat_k = 0.5;                      // Venkatakrishnan smoothing coefficient
+
+    // [turbulence]
+    TurbulenceModel turbulence_model;
+    TurbulenceConfig turbulence;
 
     // [time]
     TimeScheme scheme = TimeScheme::SspRk3;

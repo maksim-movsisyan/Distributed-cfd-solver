@@ -104,6 +104,14 @@ namespace {
     return node->value_or(def);
 }
 
+[[nodiscard]] std::int64_t opt_integer(const toml::table& t, const char* key, const std::int64_t def) {
+    const toml::node* node = t.get(key);
+    if (node == nullptr) {
+        return def;
+    }
+    return node->value_or(def);
+}
+
 [[nodiscard]] std::int64_t req_integer(const toml::table& t, const char* key,
                                        const std::string& ctx, const MPI_Comm comm) {
     const toml::node* node = t.get(key);
@@ -162,6 +170,25 @@ void check_allowed_keys(const toml::table& t,
         bool known = false;
         for (const char* a : allowed) {
             if (name == std::string_view(a)) {
+                known = true;
+                break;
+            }
+        }
+        if (!known) {
+            fail(comm, ctx + ": unknown key '" + std::string(name) + "'");
+        }
+    }
+}
+
+void check_allowed_keys(const toml::table& t,
+                        const std::vector<std::string>& allowed,
+                        const std::string& ctx, const MPI_Comm comm) {
+    for (const auto& [k, v] : t) {
+        (void)v;
+        const std::string_view name = k.str();
+        bool known = false;
+        for (const std::string& a : allowed) {
+            if (name == a) {
                 known = true;
                 break;
             }
@@ -305,17 +332,24 @@ SolverConfig parse_solver_config(const std::string& path, const MPI_Comm comm) {
     const std::string raw_content = broadcast_file_content(path, comm);
     const toml::table root = parse_in_memory_or_die(raw_content, path, comm);
 
-    check_allowed_keys(root, {"flow", "initial", "numerics", "time", "output"},
+        check_allowed_keys(root, {"flow", "initial", "numerics", "time", "output", "turbulence"},
                        "'" + path + "'", comm);
 
     { // [flow]
         const toml::table* t = req_table(root, "flow", path, comm);
         const std::string ctx = path + " [flow]";
-
+        
         const std::string eos_name = req_string(*t, "eos", ctx, comm);
+        const std::string flow_model_name = req_string(*t, "flow_model", ctx, comm);
+        
+        std::vector<std::string> allowed_keys = {"eos", "flow_model"};
+
+        // eos parsing
         if (eos_name == "IDEAL_GAS") {
             cfg.flow.type = EqOfStateType::IdealGas;
-            check_allowed_keys(*t, {"eos", "gamma", "gas_constant"}, ctx, comm);
+            allowed_keys.push_back("gamma");
+            allowed_keys.push_back("gas_constant");
+
             cfg.flow.gamma = req_number(*t, "gamma", ctx, comm);
             cfg.flow.gas_constant = req_number(*t, "gas_constant", ctx, comm);
             check_positive(cfg.flow.gamma, "gamma", ctx, comm);
@@ -323,6 +357,22 @@ SolverConfig parse_solver_config(const std::string& path, const MPI_Comm comm) {
         } else {
             fail(comm, ctx + ": unsupported EOS model '" + eos_name + "' (available: IDEAL_GAS)");
         }
+
+        // flow model parsing
+        if (flow_model_name == "INVISCID_FLOW") {
+            cfg.flow_model = FlowModel::InviscidFlow;
+
+        } else if (flow_model_name == "VISCOUS_FLOW") {
+            cfg.flow_model = FlowModel::ViscousFlow;
+            allowed_keys.push_back("prandtl");
+
+            cfg.prandtl = req_number(*t, "prandtl", ctx, comm);
+            check_positive(cfg.prandtl, "prandtl", ctx, comm);
+        } else {
+            fail(comm, ctx + ": unsupported Flow Model '" + flow_model_name + "' (available: INVISCID_FLOW, VISCOUS_FLOW)");
+        }
+
+        check_allowed_keys(*t, allowed_keys, ctx, comm);
     }
 
     { // [initial]
@@ -386,6 +436,42 @@ SolverConfig parse_solver_config(const std::string& path, const MPI_Comm comm) {
 
         cfg.limiter_venkat_k = opt_number(*t, "venkat_k", 0.5);
         check_positive(cfg.limiter_venkat_k, "venkat_k", ctx, comm);
+    }
+
+    { // [turbulence] — optional physics module selection
+        const toml::node* node = root.get("turbulence");
+        if (node != nullptr) {
+            const auto* t = node->as_table();
+            if (t == nullptr) {
+                fail(comm, path + ": [turbulence] must be a table");
+            }
+            const std::string ctx = path + " [turbulence]";
+            check_allowed_keys(*t, {"model", "nu_inf_ratio", "max_distance_sweeps",
+                                    "distance_tolerance"}, ctx, comm);
+
+            const std::string model = req_string(*t, "model", ctx, comm);
+            if (model == "SA") {
+                cfg.turbulence_model = TurbulenceModel::SA;
+                cfg.turbulence.enabled = true;
+            } else {
+                fail(comm, ctx + ": unsupported turbulence model '" + model +
+                            "' (available: SA)");
+            }
+
+            cfg.turbulence.nu_inf_ratio = opt_number(*t, "nu_inf_ratio", 3.0);
+            check_positive(cfg.turbulence.nu_inf_ratio, "nu_inf_ratio", ctx, comm);
+
+            cfg.turbulence.max_distance_sweeps =
+                static_cast<int>(opt_integer(*t, "max_distance_sweeps", 500));
+
+            cfg.turbulence.distance_tolerance =
+                opt_number(*t, "distance_tolerance", 1.0e-8);
+            check_positive(cfg.turbulence.distance_tolerance, "distance_tolerance", ctx, comm);
+
+            if (cfg.turbulence.enabled && !(cfg.flow_model == FlowModel::ViscousFlow)) {
+                fail(comm, ctx + ": turbulence requires [numerics] viscous = true");
+            }
+        }
     }
 
     { // [time]

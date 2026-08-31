@@ -5,6 +5,7 @@
 #   | u | = M a               = 1041.0...   m/s
 
 [flow]
+flow_model = "INVISCID_FLOW"
 eos = "IDEAL_GAS"
 gamma = 1.4
 gas_constant = 287.052874

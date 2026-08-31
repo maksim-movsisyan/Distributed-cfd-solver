@@ -8,9 +8,11 @@
 //
 // The operator interface required from the Solver (all public):
 //   op.evaluate_residual(state_slots)   — R(state), full pipeline
-//   op.compute_dt()                     — fills dt[] / alpha[]
+//   op.compute_dt()                     — fills dt[]/alpha[]
 //   op.u_slots()/stage_slots()/prev_slots()/res_slots() — update block pointers
 //   op.alpha(), op.n_owned(), op.ping_pong()
+//   op.post_stage(state_slots)          — module positivity clamps on the
+//                                         buffer a stage just wrote
 #pragma once
 
 #include <concepts>

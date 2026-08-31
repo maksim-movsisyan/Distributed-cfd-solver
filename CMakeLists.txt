@@ -269,6 +269,7 @@ add_library(
         src/solver/solver.cpp
         src/solver/gradient/adjacency.cpp
         src/solver/gradient/lsq_gradient.cpp
+        #src/solver/turbulence/wall_distance.cpp
 )
 
 target_include_directories(

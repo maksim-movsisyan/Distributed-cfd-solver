@@ -25,6 +25,8 @@ public:
     void compute(fields::ConstPrimitiveView q,
                  fields::PrimitiveGradView<double> grad) const override;
 
+    void compute_scalar(const double* f, double* grad3, std::size_t stride) const override;
+
     [[nodiscard]] const char* name() const noexcept override { return "WLSQ"; }
 
 private:

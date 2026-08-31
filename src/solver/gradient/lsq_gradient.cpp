@@ -207,4 +207,40 @@ void LsqGradient::compute(fields::ConstPrimitiveView q,
     }
 }
 
+void LsqGradient::compute_scalar(const double* f, double* grad3, const std::size_t stride) const {
+    const LocalIndex* CFD_RESTRICT nbo = adj_.offsets.data();
+    const LocalIndex* CFD_RESTRICT nbc = adj_.cells.data();
+
+    const double* CFD_RESTRICT wdx = wdx_.data();
+    const double* CFD_RESTRICT wdy = wdy_.data();
+    const double* CFD_RESTRICT wdz = wdz_.data();
+    const double* CFD_RESTRICT mat = mat9_.data();
+    const double* CFD_RESTRICT val = f;
+
+    for (std::size_t c = 0; c < n_own_; ++c) {
+        double r0 = 0.0;
+        double r1 = 0.0;
+        double r2 = 0.0;
+
+        const double f0 = val[c];
+        const LocalIndex j_beg = nbo[c];
+        const LocalIndex j_end = nbo[c + 1];
+
+        for (LocalIndex j = j_beg; j < j_end; ++j) {
+            const auto js = static_cast<std::size_t>(j);
+            const auto cs = static_cast<std::size_t>(nbc[js]);
+            const double df = val[cs] - f0;
+
+            r0 += wdx[js] * df;
+            r1 += wdy[js] * df;
+            r2 += wdz[js] * df;
+        }
+
+        const double* CFD_RESTRICT m = mat + 9 * c;
+        grad3[c]               = m[0] * r0 + m[1] * r1 + m[2] * r2;
+        grad3[stride + c]      = m[3] * r0 + m[4] * r1 + m[5] * r2;
+        grad3[2 * stride + c]  = m[6] * r0 + m[7] * r1 + m[8] * r2;
+    }
+}
+
 } // namespace cfd::solver::gradient

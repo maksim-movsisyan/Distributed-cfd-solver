@@ -415,5 +415,3 @@ Data of rank $r$ with topological partition ID $p = \text{rank2part}[r]$ occupie
 ---
 
 ## STATUS 
-
-In progress (30.08.2026)...

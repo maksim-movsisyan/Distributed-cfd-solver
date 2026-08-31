@@ -163,9 +163,9 @@ struct Muscl {
 
         for (std::size_t c = 0; c < n_own; ++c) {
             // 1. Determine neighbor extrema (including self)
-            double qmax[kNumPrimitives] = {prs[c], vx[c], vy[c], vz[c], tmp[c]};
-            double qmin[kNumPrimitives] = {prs[c], vx[c], vy[c], vz[c], tmp[c]};
-            const double qc[kNumPrimitives] = {prs[c], vx[c], vy[c], vz[c], tmp[c]};
+            double qmax[constants::kNumVars] = {prs[c], vx[c], vy[c], vz[c], tmp[c]};
+            double qmin[constants::kNumVars] = {prs[c], vx[c], vy[c], vz[c], tmp[c]};
+            const double qc[constants::kNumVars] = {prs[c], vx[c], vy[c], vz[c], tmp[c]};
             
             for (LocalIndex j = nbo[c]; j < nbo[c + 1]; ++j) {
                 const auto js = static_cast<std::size_t>(nbc[j]);
@@ -186,7 +186,7 @@ struct Muscl {
             }
 
             // 2. Scan cell faces and accumulate running minimum of limiter
-            double ph[kNumPrimitives] = {1.0, 1.0, 1.0, 1.0, 1.0};
+            double ph[constants::kNumVars] = {1.0, 1.0, 1.0, 1.0, 1.0};
             const double eps2 = g.eps2[c];
 
             const double g_p[3]  = {grad.dprs_dx(c), grad.dprs_dy(c), grad.dprs_dz(c)};
@@ -201,7 +201,7 @@ struct Muscl {
                 const double ey = g.cell_face_dy[es];
                 const double ez = g.cell_face_dz[es];
 
-                const double df[kNumPrimitives] = {
+                const double df[constants::kNumVars] = {
                     g_p[0]  * ex + g_p[1]  * ey + g_p[2]  * ez,
                     g_vx[0] * ex + g_vx[1] * ey + g_vx[2] * ez,
                     g_vy[0] * ex + g_vy[1] * ey + g_vy[2] * ez,
@@ -209,7 +209,7 @@ struct Muscl {
                     g_t[0]  * ex + g_t[1]  * ey + g_t[2]  * ez
                 };
 
-                for (std::size_t v = 0; v < kNumPrimitives; ++v) {
+                for (std::size_t v = 0; v < constants::kNumVars; ++v) {
                     const double d_nb = (df[v] > 0.0) ? (qmax[v] - qc[v]) : (qmin[v] - qc[v]);
                     ph[v] = std::min(ph[v], LimiterPolicy::phi(d_nb, df[v], eps2));
                 }
@@ -231,8 +231,8 @@ struct Muscl {
                             const std::size_t f,
                             const std::size_t c0,
                             const std::size_t c1,
-                            double qL[kNumPrimitives],
-                            double qR[kNumPrimitives]) noexcept {
+                            double qL[constants::kNumVars],
+                            double qR[constants::kNumVars]) noexcept {
         const double d0x = g.d0x[f];
         const double d0y = g.d0y[f];
         const double d0z = g.d0z[f];
@@ -265,8 +265,8 @@ struct Muscl {
                                      const std::size_t /*f*/,
                                      const std::size_t c0,
                                      const std::size_t cg,
-                                     double qL[kNumPrimitives],
-                                     double qR[kNumPrimitives]) noexcept {
+                                     double qL[constants::kNumVars],
+                                     double qR[constants::kNumVars]) noexcept {
         qL[0] = s.q.prs[c0];
         qL[1] = s.q.vx[c0];
         qL[2] = s.q.vy[c0];

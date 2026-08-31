@@ -41,8 +41,8 @@ struct FirstOrder {
                             const std::size_t /*f*/,
                             const std::size_t c0,
                             const std::size_t c1,
-                            double qL[kNumPrimitives],
-                            double qR[kNumPrimitives]) noexcept {
+                            double qL[constants::kNumVars],
+                            double qR[constants::kNumVars]) noexcept {
         qL[0] = s.q.prs[c0];
         qL[1] = s.q.vx[c0];
         qL[2] = s.q.vy[c0];
@@ -64,8 +64,8 @@ struct FirstOrder {
                                      const std::size_t f,
                                      const std::size_t c0,
                                      const std::size_t cg,
-                                     double qL[kNumPrimitives],
-                                     double qR[kNumPrimitives]) noexcept {
+                                     double qL[constants::kNumVars],
+                                     double qR[constants::kNumVars]) noexcept {
         face_states(s, g, f, c0, cg, qL, qR);
     }
 };

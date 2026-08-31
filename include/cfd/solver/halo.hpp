@@ -56,6 +56,12 @@ public:
     void start_exchange_grad_limiters();
     void finish_exchange_grad_limiters();
 
+    // --- One-off dynamic exchange ---------------------------------------------
+    // Blocking exchange of an UNREGISTERED field group (own message, own tag).
+    // For initialization-time solves (e.g. wall distance) that must not pay a
+    // permanent per-iteration payload slot. One message per neighbour.
+    void exchange_once(std::span<double* const> fields);
+
     // --- Diagnostics ---------------------------------------------------------
     [[nodiscard]] std::size_t num_registered_fields() const noexcept { return fields_phase_.ptrs.size(); }
     [[nodiscard]] std::size_t num_registered_grads_and_limiters() const noexcept { return grads_phase_.ptrs.size(); }

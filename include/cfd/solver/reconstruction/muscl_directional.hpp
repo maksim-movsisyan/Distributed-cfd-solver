@@ -59,8 +59,8 @@ struct MusclDirectional {
                             const std::size_t f,
                             const std::size_t c0,
                             const std::size_t c1,
-                            double qL[kNumPrimitives],
-                            double qR[kNumPrimitives]) noexcept {
+                            double qL[constants::kNumVars],
+                            double qR[constants::kNumVars]) noexcept {
         constexpr double kEps = 1.0e-12;
         const double kx = g.xix[f];
         const double ky = g.xiy[f];
@@ -85,7 +85,7 @@ struct MusclDirectional {
             s.grad.dtmp_dx(c1) * kx + s.grad.dtmp_dy(c1) * ky + s.grad.dtmp_dz(c1) * kz
         };
 
-        for (std::size_t v = 0; v < kNumPrimitives; ++v) {
+        for (std::size_t v = 0; v < constants::kNumVars; ++v) {
             const double LL = qc1[v] - 2.0 * g0[v];
             const double RR = qc0[v] + 2.0 * g1[v];
 
@@ -116,8 +116,8 @@ struct MusclDirectional {
                                      const std::size_t /*f*/,
                                      const std::size_t c0,
                                      const std::size_t cg,
-                                     double qL[kNumPrimitives],
-                                     double qR[kNumPrimitives]) noexcept {
+                                     double qL[constants::kNumVars],
+                                     double qR[constants::kNumVars]) noexcept {
         qL[0] = s.q.prs[c0];
         qL[1] = s.q.vx[c0];
         qL[2] = s.q.vy[c0];

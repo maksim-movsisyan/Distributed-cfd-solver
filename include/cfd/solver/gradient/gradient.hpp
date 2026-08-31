@@ -60,12 +60,24 @@ public:
 
     /**
      * @brief Computes spatial gradients of all primitive variables for owned cells [0, n_own).
-     * 
+     *
      * @param[in]  q    Primitive fields [prs, vx, vy, vz, tmp] (halo-complete).
      * @param[out] grad Output gradient view.
      */
     virtual void compute(fields::ConstPrimitiveView q,
                          fields::PrimitiveGradView<double> grad) const = 0;
+
+    /**
+     * @brief Computes the gradient of ONE scalar cell field for owned cells,
+     *        reusing the method's precomputed stencil (physics modules).
+     *
+     * @param[in]  f       Scalar field values [0, n_cells), halo-complete.
+     * @param[out] grad3   Output planes: [dx | dy | dz], each of length `stride`.
+     * @param[in]  stride  Plane stride in doubles.
+     */
+    virtual void compute_scalar(const double* f,
+                                double* grad3,
+                                std::size_t stride) const = 0;
 
     [[nodiscard]] virtual const char* name() const noexcept = 0;
 };

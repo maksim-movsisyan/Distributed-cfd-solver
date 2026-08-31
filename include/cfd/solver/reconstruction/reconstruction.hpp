@@ -14,8 +14,6 @@
 
 namespace cfd::solver::recon {
 
-inline constexpr std::size_t kNumPrimitives = 5; // [p, u, v, w, T]
-
 /**
  * @struct ReconField
  * @brief Context containing cell primitive values, gradients, and limiters.

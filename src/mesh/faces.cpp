@@ -1,4 +1,5 @@
 #include "cfd/mesh/faces.hpp"
+#include <mpi.h>
 
 #include <algorithm>
 #include <array>
@@ -429,6 +430,21 @@ BuildFacesResult build_faces(const RawMesh& m) {
     result.stats.n_bfaces_g = static_cast<GlobalIndex>(global_stats[1]);
     result.stats.n_ifaces_g = static_cast<GlobalIndex>(global_stats[2]);
     result.stats.n_dg_edges = static_cast<GlobalIndex>(global_stats[3]);
+
+    // consistency check
+    std::uint64_t bc_count_loc = 0, bc_count_glob = 0;
+    for (std::size_t i = 0; i < result.faces.size(); ++i) {
+        if (result.faces[i].patch != kInvalidPatchId) {
+            ++bc_count_loc;
+        }
+    }
+
+    MPI_Allreduce(&bc_count_loc, &bc_count_glob, 1, MPI_UINT64_T, MPI_SUM, comm);
+    if (bc_count_glob != static_cast<std::uint64_t>(result.stats.n_bfaces_g)) {
+        mpi::fatal(comm, "build_faces, inconsistent boundary condition counts (not boundary facses has own patch id)");
+    }
+
+
 
     mpi::log_stat("INFO[Faces]: Total face count=%lld, Boundary face count=%lld, Interior face count=%lld", 
                     static_cast<int64_t>(result.stats.n_faces_g), 

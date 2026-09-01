@@ -2,7 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
-#include <limits>
+#include <cstddef>
 
 #include "cfd/mpi/mpi_util.hpp"
 
@@ -21,6 +21,7 @@ void solve_wall_distance(const mesh::MeshPart& mp,
                          const int max_sweeps,
                          const double rel_tol,
                          double* CFD_RESTRICT dist) {
+    static_cast<void>(comm);
     const std::size_t n_inner = static_cast<std::size_t>(mp.n_inner_faces);
     const std::size_t n_faces = static_cast<std::size_t>(mp.n_faces);
     const std::size_t n_cells = static_cast<std::size_t>(mp.n_cells);
@@ -29,11 +30,11 @@ void solve_wall_distance(const mesh::MeshPart& mp,
     std::fill(dist, dist + n_cells, kInf);
 
     for (std::size_t f = n_inner; f < n_faces; ++f) {
-        const auto p = static_cast<std::size_t>(mp.face_patch[f]);
+        const std::size_t p = static_cast<std::size_t>(mp.face_patch[f]);
         if (p >= wall_patch.size() || !wall_patch[p]) {
             continue;
         }
-        const auto c0 = static_cast<std::size_t>(mp.face_owner[f]);
+        const std::size_t c0 = static_cast<std::size_t>(mp.face_owner[f]);
         const double ex = mp.face_centroid_x[f] - mp.cell_centroid_x[c0];
         const double ey = mp.face_centroid_y[f] - mp.cell_centroid_y[c0];
         const double ez = mp.face_centroid_z[f] - mp.cell_centroid_z[c0];
@@ -61,8 +62,8 @@ void solve_wall_distance(const mesh::MeshPart& mp,
             double d_new = d0;
 
             for (LocalIndex j = off[c]; j < off[c + 1]; ++j) {
-                const auto js = static_cast<std::size_t>(j);
-                const auto n = static_cast<std::size_t>(nb[js]);
+                const std::size_t js = static_cast<std::size_t>(j);
+                const std::size_t n = static_cast<std::size_t>(nb[js]);
                 const double cand = dist[n]
                                   + std::sqrt(adx[js] * adx[js]
                                             + ady[js] * ady[js]
@@ -78,7 +79,7 @@ void solve_wall_distance(const mesh::MeshPart& mp,
             }
         };
 
-        for (std::size_t c = 0; c < mp.n_own; ++c) {
+        for (std::size_t c = 0; c < static_cast<std::size_t>(mp.n_own); ++c) {
             relax_cell(c);
         }
         for (std::size_t c = static_cast<std::size_t>(mp.n_own); c-- > 0;) {

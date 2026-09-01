@@ -35,7 +35,8 @@ namespace cfd::solver {
  * @tparam EOS   Thermodynamic Equation of State conforming to eos::EquationOfState
  * @tparam Flux  Numerical flux policy (e.g., riemann::HllcFlux)
  * @tparam Recon Spatial reconstruction policy (recon::FirstOrder, recon::Muscl<Limiter>)
- * @tparam Phys  Flow equation set
+ * @tparam Phys  Flow equation set (mean-flow base; stack-level service flags,
+ *               e.g. face mass-flux storage, arrive via PhysicsStack::KernelPhysics)
  */
 template <eos::EquationOfState EOS, typename Flux,
           recon::ReconstructionPolicy Recon, physics::PhysicsGeneral Phys>

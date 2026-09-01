@@ -69,7 +69,7 @@ public:
           eos_(eos),
           phys_(phys),
           halo_(mp, comm),
-          kernel_(mp, eos, phys.base),
+          kernel_(mp, eos, phys.kernel_physics()),
           comm_(comm) {
 
         // 1. Initialize boundary conditions
@@ -649,8 +649,10 @@ private:
     bc::BoundaryManager<EOS> bcs_;
     halo::HaloExchanger halo_;
 
-    using MeanFlowPhys = typename PhysPolicy::BaseType;
-    ResidualKernel<EOS, FluxPolicy, ReconPolicy, MeanFlowPhys> kernel_;
+    // The mean-flow kernel sees only the base equation set, augmented with
+    // stack-level service flags (face mass flux) through PhysicsStack::
+    // KernelPhysics — it stays fully decoupled from module machinery.
+    ResidualKernel<EOS, FluxPolicy, ReconPolicy, typename PhysPolicy::KernelPhysics> kernel_;
     
     TimePolicy time_{};
     MPI_Comm comm_{MPI_COMM_WORLD};

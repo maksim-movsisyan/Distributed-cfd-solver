@@ -41,7 +41,7 @@
 #include "cfd/solver/fields/fields_view.hpp"
 #include "cfd/solver/gradient/gradient.hpp"
 #include "cfd/solver/halo.hpp"
-#include "cfd/solver/physics/laminar_ns.hpp"
+#include "cfd/solver/physics/viscous_flow.hpp"
 #include "cfd/solver/turbulence/wall_distance.hpp"
 
 namespace cfd::solver::turb {
@@ -65,13 +65,21 @@ public:
     int max_distance_sweeps = 500;       ///< Wall-distance sweep budget
     double distance_tolerance = 1.0e-8;  ///< Wall-distance relative tolerance
 
-    // --- Module metadata (PhysicsModule contract) ---
-    static constexpr std::size_t kNumVars = 1;
+    // --- Module metadata (satisfies physics::PhysicsGeneral like the stack
+    //     base; a module carries no equation set of its own) ---
+    static constexpr std::size_t kNumVars = 1;      ///< transported rho*nu_tilde
+    static constexpr bool kHasViscous = false;      ///< not an equation set
+    static constexpr std::size_t kNumExtraVars = 0; ///< carries no sub-modules
     static constexpr bool kNeedsGradients = true;   ///< its own nu_tilde plane
     static constexpr bool kNeedsFaceMdot = true;    ///< upwind convection
     static constexpr bool kNeedsWallDist = true;
     static constexpr bool kHasEddyViscosity = true; ///< provides mut
     static constexpr const char* name() noexcept { return "SA"; }
+
+    struct Geometry {};
+    [[nodiscard]] static Geometry build_geometry(const mesh::MeshPart& /*mp*/) noexcept {
+        return {};
+    }
 
     // --- Model constants (Spalart & Allmaras, 1994) ---
     static constexpr double kCb1 = 0.1355;
@@ -163,13 +171,13 @@ public:
         {
             std::vector<NuZoneKind> patch_kind(mp.patches.size(), NuZoneKind::Symmetry);
             for (const auto& desc : bcfg.patches) {
-                const auto p = static_cast<std::size_t>(desc.patch_id);
+                const std::size_t p = static_cast<std::size_t>(desc.patch_id);
                 if (p < patch_kind.size()) {
                     patch_kind[p] = zone_kind(desc.type);
                 }
             }
             for (std::size_t f = n_inner_; f < n_faces_; ++f) {
-                const auto p = static_cast<std::size_t>(mp.face_patch[f]);
+                const std::size_t p = static_cast<std::size_t>(mp.face_patch[f]);
                 face_kind_[f - n_inner_] = (p < patch_kind.size())
                                          ? patch_kind[p]
                                          : NuZoneKind::Symmetry;
@@ -186,7 +194,7 @@ public:
 
         // 3. Freestream working values
         const double T_inf = eos.temperature_rhop(rho_inf_, p_inf_);
-        nu_inf_ = nu_inf_ratio * physics::LaminarNavierStokes::viscosity(T_inf) / rho_inf_;
+        nu_inf_ = nu_inf_ratio * physics::ViscousFlow::viscosity(T_inf) / rho_inf_;
         rho_nu_inf_ = rho_inf_ * nu_inf_;
     }
 
@@ -211,7 +219,7 @@ public:
         // BC ghost planes mirror the interior (sign flip at no-slip walls)
         for (std::size_t f = n_inner_; f < n_faces_; ++f) {
             const std::size_t i = f - n_inner_;
-            const auto c0 = static_cast<std::size_t>(mp.face_owner[f]);
+            const std::size_t c0 = static_cast<std::size_t>(mp.face_owner[f]);
             const std::size_t cg = n_cells_ + i;
             const double s = (face_kind_[i] == NuZoneKind::Wall) ? -1.0 : 1.0;
 
@@ -226,7 +234,7 @@ public:
     void apply_bcs(const EOS& eos, const mesh::MeshPart& mp) const {
         for (std::size_t f = n_inner_; f < n_faces_; ++f) {
             const std::size_t i = f - n_inner_;
-            const auto c0 = static_cast<std::size_t>(mp.face_owner[f]);
+            const std::size_t c0 = static_cast<std::size_t>(mp.face_owner[f]);
             const std::size_t cg = n_cells_ + i;
 
             switch (face_kind_[i]) {
@@ -261,7 +269,7 @@ public:
             rho_[c] = rho;
             nu_[c] = nu;
 
-            const double nu_lam = physics::LaminarNavierStokes::viscosity(q_tmp(c)) / rho;
+            const double nu_lam = physics::ViscousFlow::viscosity(q_tmp(c)) / rho;
             const double chi = nu / nu_lam;
             const double chi3 = chi * chi * chi;
             const double fv1 = chi3 / (chi3 + kCv1_3);
@@ -298,8 +306,8 @@ public:
 
         // 1. Interior faces
         for (std::size_t f = 0; f < n_inner_; ++f) {
-            const auto c0 = static_cast<std::size_t>(owner[f]);
-            const auto c1 = static_cast<std::size_t>(neigh[f]);
+            const std::size_t c0 = static_cast<std::size_t>(owner[f]);
+            const std::size_t c1 = static_cast<std::size_t>(neigh[f]);
 
             // Upwind convection on the shared mass flux
             const double m = mdot[f];
@@ -311,7 +319,7 @@ public:
             face_gradient(f, c0, nu_[c0], c1, nu_[c1], geom, gn);
 
             const double Tf = 0.5 * (q_tmp(c0) + q_tmp(c1));
-            const double mu_f = physics::LaminarNavierStokes::viscosity(Tf);
+            const double mu_f = physics::ViscousFlow::viscosity(Tf);
             const double rho_f = 0.5 * (rho_[c0] + rho_[c1]);
             const double nu_f = 0.5 * (nu_[c0] + nu_[c1]);
             const double coef = inv_sigma * (mu_f + rho_f * nu_f);
@@ -324,7 +332,7 @@ public:
 
             // Spectral radius: |u_n| A + diffusion estimate [m^3 / s]
             const double visc_term = 2.0 * inv_sigma * (mu_f + rho_f * nu_f)
-                                   / rho_f * area[f] * std::sqrt(geom.inv_d2[f]);
+                                   / rho_f * area[f] * geom.inv_d[f];
             const double w = std::abs(m) / rho_f + visc_term;
             lam[c0] += w;
             lam[c1] += w;
@@ -333,7 +341,7 @@ public:
         // 2. Boundary faces: owner + BC ghost
         for (std::size_t f = n_inner_; f < n_faces_; ++f) {
             const std::size_t i = f - n_inner_;
-            const auto c0 = static_cast<std::size_t>(owner[f]);
+            const std::size_t c0 = static_cast<std::size_t>(owner[f]);
             const std::size_t cg = n_cells_ + i;
 
             const double m = mdot[f];
@@ -349,7 +357,7 @@ public:
             face_gradient(f, c0, nu_[c0], cg, nu_g, geom, gn);
 
             const double Tf = 0.5 * (q_tmp(c0) + q_tmp(cg));
-            const double mu_f = physics::LaminarNavierStokes::viscosity(Tf);
+            const double mu_f = physics::ViscousFlow::viscosity(Tf);
             const double rho_f = 0.5 * (rho_[c0] + rho_g);
             const double coef = inv_sigma * (mu_f + rho_f * 0.5 * (nu_[c0] + nu_g));
 
@@ -390,7 +398,7 @@ public:
                             + 0.5 * (s_xy * s_xy + s_xz * s_xz + s_yz * s_yz);
             const double S = std::sqrt(std::max(s2, 0.0));
 
-            const double nu_lam = physics::LaminarNavierStokes::viscosity(q_tmp(c)) / rho;
+            const double nu_lam = physics::ViscousFlow::viscosity(q_tmp(c)) / rho;
             const double chi = nu / nu_lam;
             const double chi3 = chi * chi * chi;
             const double fv1 = chi3 / (chi3 + kCv1_3);
@@ -493,7 +501,8 @@ private:
 
         const double jump = nu_r - nu_l;
         const double gd = gn[0] * dx + gn[1] * dy + gn[2] * dz;
-        const double corr = (jump - gd) * geom.inv_d2[f];
+        const double inv_d = geom.inv_d[f];
+        const double corr = (jump - gd) * inv_d * inv_d;
         gn[0] += corr * dx;
         gn[1] += corr * dy;
         gn[2] += corr * dz;
@@ -501,6 +510,9 @@ private:
 
     static constexpr double kSbarFloor = 1.0e-10;
     static constexpr double kMinWallDist = 1.0e-10;
+
+    static_assert(physics::PhysicsGeneral<SpalartAllmaras>,
+                  "SpalartAllmaras must satisfy physics::PhysicsGeneral");
 
     // Sizes
     std::size_t n_own_ = 0;

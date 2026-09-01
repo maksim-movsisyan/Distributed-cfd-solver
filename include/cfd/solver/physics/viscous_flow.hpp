@@ -34,7 +34,7 @@ struct ViscousFlow {
      */
     struct Geometry {
         std::vector<double> dx, dy, dz; ///< [n_faces] centroid displacement x_R - x_L
-        std::vector<double> inv_d;     ///< [n_faces] 1 / |d|^2 (correction weight)
+        std::vector<double> inv_d;     ///< [n_faces] 1 / |d| (correction weight)
     };
 
     /**

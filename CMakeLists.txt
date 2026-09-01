@@ -66,6 +66,10 @@ if(NOT TARGET CGNS::cgns_static)
     )
 endif()
 
+set_property(TARGET CGNS::cgns_static PROPERTY INTERFACE_LINK_LIBRARIES "")
+target_link_libraries(CGNS::cgns_static INTERFACE HDF5::HDF5)
+
+
 #==================================================================
 #==== DKAMINPAR LIBRARY ===========================================
 #==================================================================
@@ -269,7 +273,7 @@ add_library(
         src/solver/solver.cpp
         src/solver/gradient/adjacency.cpp
         src/solver/gradient/lsq_gradient.cpp
-        #src/solver/turbulence/wall_distance.cpp
+        src/solver/turbulence/wall_distance.cpp
 )
 
 target_include_directories(

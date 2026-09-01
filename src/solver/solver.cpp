@@ -11,7 +11,7 @@
 #include "cfd/solver/reconstruction/muscl_directional.hpp"
 #include "cfd/solver/riemann/hllc.hpp"
 #include "cfd/solver/time/forward_euler.hpp"
-//#include "cfd/solver/turbulence/spalart_allmaras.hpp"
+#include "cfd/solver/turbulence/spalart_allmaras.hpp"
 #include "cfd/solver/time/ssp_rk3.hpp"
 
 namespace cfd::solver {
@@ -158,16 +158,15 @@ int dispatch_physics(const SolverConfig& cfg,
                      const MPI_Comm comm,
                      const EosType& eos) {
     if (cfg.turbulence.enabled) {
-        //using SaStack = physics::PhysicsStack<physics::ViscousFlow, turb::SpalartAllmaras>;
+        using SaStack = physics::PhysicsStack<physics::ViscousFlow, turb::SpalartAllmaras>;
 
-        //turb::SpalartAllmaras sa{};
-        //sa.nu_inf_ratio = cfg.turbulence.nu_inf_ratio;
-        //sa.max_distance_sweeps = cfg.turbulence.max_distance_sweeps;
-        //sa.distance_tolerance = cfg.turbulence.distance_tolerance;
+        turb::SpalartAllmaras sa{};
+        sa.nu_inf_ratio = cfg.turbulence.nu_inf_ratio;
+        sa.max_distance_sweeps = cfg.turbulence.max_distance_sweeps;
+        sa.distance_tolerance = cfg.turbulence.distance_tolerance;
 
-        //const SaStack phys{physics::LaminarNavierStokes{cfg.prandtl}, std::tuple{sa}};
-        //return dispatch_flux<EosType, SaStack>(cfg, bcfg, mp, comm, eos, phys);
-        mpi::fatal(comm, "dispatch: Turbulence modeling are not supported yet");
+        const SaStack phys{physics::ViscousFlow{cfg.prandtl}, std::tuple{sa}};
+        return dispatch_flux<EosType, SaStack>(cfg, bcfg, mp, comm, eos, phys);
     }
 
     if (cfg.flow_model == FlowModel::ViscousFlow) {

@@ -60,6 +60,24 @@ public:
     static constexpr bool kNeedsFaceMdot = (Modules::kNeedsFaceMdot || ...);
     static constexpr bool kNeedsWallDist = (Modules::kNeedsWallDist || ...);
 
+    /**
+     * @brief The mean-flow physics the ResidualKernel instantiates with: the
+     *        stack BASE augmented with stack-level service flags (face
+     *        mass-flux storage for module convection). The kernel never sees
+     *        the full stack — only this base view, so it stays decoupled from
+     *        module machinery while remaining compile-time specialized.
+     */
+    struct KernelPhysics : BaseT {
+        static constexpr bool kNeedsFaceMdot = PhysicsStack::kNeedsFaceMdot;
+    };
+
+    static_assert(PhysicsGeneral<KernelPhysics>);
+
+    /** @brief The kernel's physics instance (base values + service flags). */
+    [[nodiscard]] KernelPhysics kernel_physics() const noexcept {
+        return KernelPhysics{base};
+    }
+
     // --- PhysicsGeneral interface: delegating to the mean-flow base -------------
     using Geometry = typename BaseT::Geometry;
 

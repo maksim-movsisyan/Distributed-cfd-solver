@@ -15,10 +15,8 @@
 
 #include <mpi.h>
 
-#include <cstddef>
 #include <vector>
 
-#include "cfd/core/types.hpp"
 #include "cfd/mesh/localmesh.hpp"
 #include "cfd/solver/gradient/gradient.hpp"
 #include "cfd/solver/halo.hpp"

@@ -149,6 +149,37 @@ target_link_libraries(
 )
 
     #=================
+    #=== LINALG ======
+    #=================
+add_library(
+    cfd_linalg
+    STATIC
+        src/linalg/types.cpp
+        src/linalg/vector_layout.cpp
+        src/linalg/vector.cpp
+        src/linalg/csr_matrix.cpp
+        src/linalg/bsr_matrix.cpp
+        src/linalg/preconditioners.cpp
+        src/linalg/bicgstab.cpp
+)
+
+target_include_directories(
+    cfd_linalg
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+)
+
+target_link_libraries(
+    cfd_linalg
+    PUBLIC
+        cfd_project_options
+        MPI::MPI_CXX
+    PRIVATE
+        cfd_project_warnings
+)
+
+    #=================
     #=== MESH DATA ===
     #=================
 add_library(
@@ -358,6 +389,33 @@ target_link_libraries(
 #==== TESTS =======================================================
 #==================================================================
 if(BUILD_TESTING)
+    #=== LINALG MODULE TESTS ===
+    add_executable(cfd_linalg_test tests/linalg_test.cpp)
+
+    target_link_libraries(
+        cfd_linalg_test
+        PRIVATE
+            cfd_project_warnings
+            cfd_project_options
+            cfd_linalg
+    )
+
+    foreach(np RANGE 1 4)
+        add_test(
+            NAME linalg.core.${np}
+            COMMAND
+                ${MPIEXEC_EXECUTABLE}
+                ${MPIEXEC_NUMPROC_FLAG} ${np}
+                $<TARGET_FILE:cfd_linalg_test>
+        )
+        set_tests_properties(
+            linalg.core.${np}
+            PROPERTIES
+                PROCESSORS ${np}
+                TIMEOUT 240
+        )
+    endforeach()
+
     #=== DKAMINPAR DISTRIBUTED API SMOKE TEST ===
     add_executable(cfd_kaminpar_api tests/kaminpar_api.cpp)
 

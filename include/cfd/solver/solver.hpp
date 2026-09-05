@@ -311,8 +311,132 @@ public:
         }
     }
 
+    // --- Implicit-scheme services (consumed by implicit time policies) --------
+
+    [[nodiscard]] const mesh::MeshPart& mesh() const noexcept { return mp_; }
+    [[nodiscard]] MPI_Comm mpi_comm() const noexcept { return comm_; }
+    [[nodiscard]] const SolverConfig& config() const noexcept { return cfg_; }
+    /** @brief Local time step per owned cell [0, n_own). */
+    [[nodiscard]] const double* local_dt() const noexcept { return dt_.data(); }
+
+    /**
+     * @brief Assembles dR/dU of the mean flow into `sink`
+     *        (sink.add_block(row_cell, col_cell, scale, block5x5), mesh cell
+     *        ids). Call after evaluate_residual of the same state so the
+     *        gathered primitives (halos + BC ghosts) are current.
+     *
+     * Interior faces: first-order flux Jacobians (ResidualKernel). Boundary
+     * faces: exact derivative through the discrete BC ghost response.
+     */
+    template <typename JacobianSink>
+    void assemble_mean_flow_jacobian(JacobianSink& sink) noexcept {
+        kernel_.assemble_jacobian(q_view_.as_const(), sink);
+        assemble_boundary_jacobian(sink);
+    }
+
 private:
     // --- Memory Allocation, Views & Slot Binding ------------------------------
+
+    /**
+     * @brief Boundary-face blocks dF_b/dU_c0 through the ACTUAL BC ghost
+     *        response: perturb every owned conserved state in one component,
+     *        let the real BC machinery recompute the ghosts (each ghost depends
+     *        only on its face's interior cell, so a global direction cleanly
+     *        separates per-cell responses) and central-difference the boundary
+     *        fluxes. Cost: 10 cheap sweeps — primitive conversions, one BC
+     *        ghost pass and one flux per boundary face each. Exact w.r.t. the
+     *        discrete BCs, no duplication of BC formulas.
+     */
+    template <typename JacobianSink>
+    void assemble_boundary_jacobian(JacobianSink& sink) noexcept {
+        constexpr int N = PhysPolicy::kNumVars;
+        const std::size_t n_own = static_cast<std::size_t>(mp_.n_own);
+        const std::size_t n_inner = static_cast<std::size_t>(mp_.n_inner_faces);
+        const std::size_t n_faces = static_cast<std::size_t>(mp_.n_faces);
+        const std::size_t n_cells = static_cast<std::size_t>(mp_.n_cells);
+        const std::size_t n_bfaces = n_faces - n_inner;
+        if (n_bfaces == 0) return;
+
+        const LocalIndex* CFD_RESTRICT owner = mp_.face_owner.data();
+        const double* CFD_RESTRICT nx = mp_.face_normal_x.data();
+        const double* CFD_RESTRICT ny = mp_.face_normal_y.data();
+        const double* CFD_RESTRICT nz = mp_.face_normal_z.data();
+        const double* CFD_RESTRICT area = mp_.face_area.data();
+
+        // Unperturbed conserved states and per-component FD steps.
+        std::vector<double> u0(n_own * N);
+        std::vector<double> eps(n_own * N);
+        for (std::size_t c = 0; c < n_own; ++c) {
+            eos::primitives_pT_to_conserved(eos_, q_view_.prs[c], q_view_.vx[c], q_view_.vy[c],
+                                            q_view_.vz[c], q_view_.tmp[c], &u0[c * N]);
+            for (int k = 0; k < N; ++k) {
+                eps[c * N + k] = 1.0e-6 * (std::fabs(u0[c * N + k]) + 1.0);
+            }
+        }
+
+        std::vector<double> fp(n_bfaces * N), fm(n_bfaces * N);
+        double U[2 * N];
+        double F[N];
+
+        for (int k = 0; k < N; ++k) {
+            for (int sgn : {+1, -1}) {
+                // Owned primitives from the perturbed conserved state.
+                for (std::size_t c = 0; c < n_own; ++c) {
+                    for (int v = 0; v < N; ++v) {
+                        U[v] = u0[c * N + v];
+                    }
+                    U[k] += sgn * eps[c * N + k];
+                    eos::conserved_to_primitives_pT(eos_, U, q_view_.prs[c], q_view_.vx[c],
+                                                    q_view_.vy[c], q_view_.vz[c],
+                                                    q_view_.tmp[c]);
+                }
+                bcs_.apply_all(q_view_, mp_);  // ghosts from perturbed interiors
+
+                std::vector<double>& fs = (sgn > 0) ? fp : fm;
+                for (std::size_t f = n_inner; f < n_faces; ++f) {
+                    const std::size_t b = f - n_inner;
+                    const std::size_t c0 = static_cast<std::size_t>(owner[f]);
+                    const std::size_t cg = n_cells + b;
+                    double UL[N], UR[N];
+                    eos::primitives_pT_to_conserved(eos_, q_view_.prs[c0], q_view_.vx[c0],
+                                                    q_view_.vy[c0], q_view_.vz[c0],
+                                                    q_view_.tmp[c0], UL);
+                    eos::primitives_pT_to_conserved(eos_, q_view_.prs[cg], q_view_.vx[cg],
+                                                    q_view_.vy[cg], q_view_.vz[cg],
+                                                    q_view_.tmp[cg], UR);
+                    // Smooth surrogate flux: the FD must stay differentiable
+                    // through the HLLC branch boundaries (see face_flux_jacobian).
+                    FluxPolicy::rusanov_face_flux(eos_, UL, UR, nx[f], ny[f], nz[f], area[f], F);
+                    for (int i = 0; i < N; ++i) {
+                        fs[b * N + i] = F[i];
+                    }
+                }
+            }
+        }
+
+        // Restore the unperturbed primitives (the next evaluate_residual would
+        // rebuild them; this keeps q consistent within the step).
+        for (std::size_t c = 0; c < n_own; ++c) {
+            eos::conserved_to_primitives_pT(eos_, &u0[c * N], q_view_.prs[c], q_view_.vx[c],
+                                            q_view_.vy[c], q_view_.vz[c], q_view_.tmp[c]);
+        }
+        bcs_.apply_all(q_view_, mp_);
+
+        // Per-face diagonal blocks; a cell owning several boundary faces
+        // simply accumulates several blocks.
+        double dB[N * N];
+        for (std::size_t f = n_inner; f < n_faces; ++f) {
+            const std::size_t b = f - n_inner;
+            const std::size_t c0 = static_cast<std::size_t>(owner[f]);
+            for (int kk = 0; kk < N; ++kk) {
+                const double inv_2h = 1.0 / (2.0 * eps[c0 * N + kk]);
+                for (int i = 0; i < N; ++i) {
+                    dB[i * N + kk] = (fp[b * N + i] - fm[b * N + i]) * inv_2h;
+                }
+            }
+            sink.add_block(owner[f], owner[f], 1.0, dB);
+        }
+    }
 
     void allocate_fields(const std::size_t n_total) {
         // Primary State U & Q

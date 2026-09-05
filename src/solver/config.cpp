@@ -214,7 +214,7 @@ void parse_inflow_descriptor(const toml::table& t,
                              const std::string& ctx,
                              const MPI_Comm comm) {
     const bool has_vel = t.contains("velocity") || t.contains("velocity_inf");
-    const bool has_mach = t.contains("mach");
+    const bool has_mach = t.contains("mach") || t.contains("mach_inf");
     const bool has_dir = t.contains("direction");
     const bool has_angles = t.contains("alpha") || t.contains("alpha_deg") ||
                             t.contains("beta")  || t.contains("beta_deg");
@@ -248,7 +248,7 @@ void parse_inflow_descriptor(const toml::table& t,
     } else if (has_dir) {
         d.inflow_mode = bc::InflowMode::MachDirection;
         check_allowed_keys(t, {"patch_id", "type", "name", "cgns_type", "global_face_count",
-                               "p", "p_inf", "t", "t_inf", "mach", "direction"},
+                               "p", "p_inf", "t", "t_inf", "mach", "", "direction"},
                            ctx, comm);
     } else {
         d.inflow_mode = bc::InflowMode::MachAngles;
@@ -477,15 +477,20 @@ SolverConfig parse_solver_config(const std::string& path, const MPI_Comm comm) {
     { // [time]
         const toml::table* t = req_table(root, "time", path, comm);
         const std::string ctx = path + " [time]";
-        check_allowed_keys(*t, {"scheme", "cfl", "max_iterations", "residual_tolerance"},
-                           ctx, comm);
+        check_allowed_keys(
+            *t, {"scheme", "cfl", "max_iterations", "residual_tolerance", "implicit_tolerance",
+                 "implicit_max_iterations"},
+            ctx, comm);
         const std::string scheme = req_string(*t, "scheme", ctx, comm);
         if (scheme == "FORWARD_EULER") {
             cfg.scheme = TimeScheme::ForwardEuler;
         } else if (scheme == "SSP_RK3") {
             cfg.scheme = TimeScheme::SspRk3;
+        } else if (scheme == "BACKWARD_EULER") {
+            cfg.scheme = TimeScheme::BackwardEuler;
         } else {
-            fail(comm, ctx + ": unsupported scheme '" + scheme + "' (available: FORWARD_EULER, SSP_RK3)");
+            fail(comm, ctx + ": unsupported scheme '" + scheme +
+                           "' (available: FORWARD_EULER, SSP_RK3, BACKWARD_EULER)");
         }
         cfg.cfl = req_number(*t, "cfl", ctx, comm);
         check_positive(cfg.cfl, "cfl", ctx, comm);
@@ -495,6 +500,14 @@ SolverConfig parse_solver_config(const std::string& path, const MPI_Comm comm) {
         }
         cfg.residual_tolerance = req_number(*t, "residual_tolerance", ctx, comm);
         check_positive(cfg.residual_tolerance, "residual_tolerance", ctx, comm);
+        // Implicit-scheme linear solver budget (optional)
+        cfg.implicit_tolerance = opt_number(*t, "implicit_tolerance", 1.0e-4);
+        check_positive(cfg.implicit_tolerance, "implicit_tolerance", ctx, comm);
+        cfg.implicit_max_iterations =
+            opt_integer(*t, "implicit_max_iterations", 100);
+        if (cfg.implicit_max_iterations < 1) {
+            fail(comm, ctx + ": 'implicit_max_iterations' must be >= 1");
+        }
     }
 
     { // [output]

@@ -327,6 +327,7 @@ target_link_libraries(
         cfd_mpi
         cfd_mesh
         cfd_solver_mesh_io
+        cfd_linalg
     PRIVATE
         cfd_project_warnings
 )

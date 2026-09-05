@@ -1,0 +1,34 @@
+# Flat plate, implicit Backward Euler variant of solver.toml.
+# The linear system (5x5 blocks, one per cell pair) is assembled natively from
+# the mesh and solved by distributed BiCGSTAB + hybrid SGS.
+#
+# Same physics/numerics as solver.toml; only [time] differs.
+
+[flow]
+flow_model = "VISCOUS_FLOW"
+prandtl = 0.71
+eos = "IDEAL_GAS"
+gamma = 1.4
+gas_constant = 287.052874
+
+[initial]
+rho = 0.18177
+pressure = 5590.34
+velocity = [622.13, 0.0, 0.0]
+
+[numerics]
+flux = "HLLC"
+reconstruction = "FIRST_ORDER"
+
+[time]
+scheme = "BACKWARD_EULER"
+cfl = 20.0
+max_iterations = 10000
+residual_tolerance = 1.0e-10
+implicit_tolerance = 1.0e-4
+implicit_max_iterations = 100
+
+[output]
+directory = "out/plate_implicit"
+field_interval = 1000
+residual_interval = 50

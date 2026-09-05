@@ -148,6 +148,64 @@ public:
         return phys_geom_;
     }
 
+    /**
+     * @brief Assembles dR/dU of the FIRST-ORDER mean-flow operator into `sink`
+     *        as signed 5x5 blocks per cell pair.
+     *
+     * Standard implicit-scheme approximation: the matrix linearizes the
+     * first-order flux (piecewise-constant cell states) even when the residual
+     * itself runs MUSCL — reconstruction/limiter derivatives are dropped, the
+     * stencil stays one-hop. Interior faces only, blocks:
+     *   J(c0,c0) += dFL, J(c0,c1) += dFR,
+     *   J(c1,c0) -= dFL, J(c1,c1) -= dFR
+     * Contributions with a non-owned row cell (an MPI ghost across the
+     * partition boundary) are the neighbouring rank's business; the sink
+     * filters them. Boundary faces are linearized separately through the
+     * actual BC ghost machinery (Solver::assemble_boundary_jacobian).
+     *
+     * @param q    Primitive states, halo- and BC-complete (from a preceding
+     *             evaluate_residual of the same state).
+     * @param sink Receiver with add_block(row_cell, col_cell, scale, block5x5).
+     */
+    template <typename JacobianSink>
+    void assemble_jacobian(fields::ConstPrimitiveView q, JacobianSink& sink) const noexcept {
+        constexpr int N = Phys::kNumVars;
+        static_assert(Phys::kNumVars == constants::kNumVars,
+                      "assemble_jacobian expects the 5-var mean-flow base");
+
+        const std::size_t n_inner = static_cast<std::size_t>(mp_.n_inner_faces);
+
+        const LocalIndex* CFD_RESTRICT owner = mp_.face_owner.data();
+        const LocalIndex* CFD_RESTRICT neigh = mp_.face_neigh.data();
+        const double* CFD_RESTRICT nx = mp_.face_normal_x.data();
+        const double* CFD_RESTRICT ny = mp_.face_normal_y.data();
+        const double* CFD_RESTRICT nz = mp_.face_normal_z.data();
+        const double* CFD_RESTRICT area = mp_.face_area.data();
+
+        double dFL[N * N];
+        double dFR[N * N];
+
+        for (std::size_t f = 0; f < n_inner; ++f) {
+            const LocalIndex c0 = owner[f];
+            const LocalIndex c1 = neigh[f];
+            const double nxf = nx[f], nyf = ny[f], nzf = nz[f], Af = area[f];
+
+            double UL[N], UR[N];
+            eos::primitives_pT_to_conserved(eos_, q.prs[c0], q.vx[c0], q.vy[c0], q.vz[c0],
+                                            q.tmp[c0], UL);
+            eos::primitives_pT_to_conserved(eos_, q.prs[c1], q.vx[c1], q.vy[c1], q.vz[c1],
+                                            q.tmp[c1], UR);
+
+            Flux::face_flux_jacobian(eos_, UL, UR, nxf, nyf, nzf, Af, dFL, dFR);
+
+            // Residual convention: res[c0] += F, res[c1] -= F.
+            sink.add_block(c0, c0, 1.0, dFL);
+            sink.add_block(c0, c1, 1.0, dFR);
+            sink.add_block(c1, c0, -1.0, dFL);
+            sink.add_block(c1, c1, -1.0, dFR);
+        }
+    }
+
 private:
     struct ViscousFaceResult {
         double Fv1{0.0};

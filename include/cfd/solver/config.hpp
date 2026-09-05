@@ -82,6 +82,7 @@ enum class FluxType {
 enum class TimeScheme {
     ForwardEuler,
     SspRk3,
+    BackwardEuler,
 };
 
 enum class ReconType {
@@ -138,6 +139,9 @@ struct SolverConfig {
     double cfl = 0.4;
     std::int64_t max_iterations = 10000;
     double residual_tolerance = 1.0e-10; // relative L2 drop
+    // [time], implicit schemes: linear solver budget per step
+    double implicit_tolerance = 1.0e-4;   // BiCGSTAB relative residual per step
+    std::int64_t implicit_max_iterations = 100; // BiCGSTAB iteration cap
 
     // [output]
     std::string output_dir = "out/solver";

@@ -52,15 +52,15 @@ void write_param_block(std::ofstream& out, const std::string& type) {
         out << "beta     = 0.0      # Sideslip angle [deg] (optional)\n";
     } else if (type == "USER_DEFINED") {
         out << "# [Pick a type above, then uncomment its parameters]\n";
-        out << "# p         = 101325.0        # SUPERSONIC_INLET: static pressure [Pa]\n";
-        out << "# t         = 300.0           # SUPERSONIC_INLET: static temperature [K]\n";
-        out << "# mach      = 2.0             # SUPERSONIC_INLET: Mach number [-]\n";
-        out << "# direction = [1.0, 0.0, 0.0] # SUPERSONIC_INLET: flow direction\n";
-        out << "# mach_inf  = 2.0             # FARFIELD: freestream Mach number\n";
-        out << "# p_inf     = 101325.0        # FARFIELD: static pressure [Pa]\n";
-        out << "# t_inf     = 300.0           # FARFIELD: static temperature [K]\n";
-        out << "# alpha     = 0.0             # FARFIELD: angle of attack [deg]\n";
-        out << "# beta      = 0.0             # FARFIELD: sideslip angle [deg]\n";
+        out << "# p         = 101325.0        # static pressure [Pa]\n";
+        out << "# t         = 300.0           # static temperature [K]\n";
+        out << "# mach      = 2.0             # Mach number [-]\n";
+        out << "# direction = [1.0, 0.0, 0.0] # flow direction\n";
+        out << "# mach_inf  = 2.0             # freestream Mach number\n";
+        out << "# p_inf     = 101325.0        # static pressure [Pa]\n";
+        out << "# t_inf     = 300.0           # static temperature [K]\n";
+        out << "# alpha     = 0.0             # angle of attack [deg]\n";
+        out << "# beta      = 0.0             # sideslip angle [deg]\n";
     } else {
         out << "# (no parameters for this BC type)\n";
     }
@@ -104,17 +104,29 @@ void generate_bc_template_config(const MeshPart& mp, const std::string& output_f
     out << "# Total Global Boundary Faces: " << mp.n_bfaces_g << "\n";
     out << "#\n";
     out << "# Available BC Types (implemented):\n";
-    out << "#   - SLIP_WALL          (Inviscid slip wall; no parameters)\n";
-    out << "#   - SYMMETRY           (Planar symmetry; no parameters)\n";
-    out << "#   - SUPERSONIC_INLET   (p [Pa], t [K], mach, direction [x, y, z])\n";
-    out << "#   - SUPERSONIC_OUTLET  (Supersonic outflow extrapolation; no parameters)\n";
-    out << "#   - FARFIELD           (mach_inf, p_inf [Pa], t_inf [K], alpha [deg], beta [deg])\n";
-    out << "#\n";
-    out << "# Planned BC Types (not yet implemented by the solver):\n";
-    out << "#   - SUBSONIC_INLET     (p0 [Pa], t0 [K], direction)\n";
-    out << "#   - PRESSURE_OUTLET    (p_back [Pa])\n";
-    out << "#   - WALL_ADIABATIC     (No-slip viscous adiabatic wall)\n";
-    out << "#   - WALL_ISOTHERMAL    (t_wall [K])\n";
+    out << "#   - SUPERSONIC_INLET          (Supersonic inlet, avaliable parameter lists:\n";
+    out << "#                                   1. pressure, velocity vector, temperature\n";
+    out << "#                                   2. pressure, mach number, direction vector, temperature\n";
+    out << "#                                   3. pressure, mach number, angel of attack, slip angel, temperature)\n";
+    out << "#   - FARFIELD                  (Farfield, avaliable parameter lists:\n";
+    out << "#                                   1. pressure inf, velocity vector inf, temperature inf\n";
+    out << "#                                   2. pressure inf, mach number inf, direction vector, temperature inf\n";
+    out << "#                                   3. pressure inf, mach number inf, angel of attack, slip angel, temperature inf)\n";
+    out << "#   - SUPERSONIC_OUTLET         (Supersonic outflow extrapolation; no parameters)\n";
+    out << "#   - SLIP_WALL                 (Inviscid slip wall; no parameters)\n";
+    out << "#   - SYMMETRY                  (Planar symmetry; no parameters)\n";
+    out << "#   - NOSLIP_WALL               (Viscous noslip wall; avaliable parameter lists:\n";
+    out << "#                                   1. no paramertes (noslip wall at t = 288.15 K) \n";
+    out << "#                                   2. wall velocity, wall temperature)\n";
+    out << "#   - NO_SLIP_WALL_HEAT_FLUX    (Viscous noslip wall; avaliable parameter lists:\n";
+    out << "#                                   1. no paramertes (noslip adiabatic wall)\n";
+    out << "#                                   2. wall velocity, wall temperature GRADIENT(!!))\n";
+    out << "#   - SUBSONIC_INLET            (Subsonic inlet, avaliable parameter lists:\n";
+    out << "#                                   1. velocity vector, temperature\n";
+    out << "#                                   2. mach number, direction vector, temperature\n";
+    out << "#                                   3. mach number, angel of attack, slip angel, temperature)\n";
+    out << "#   - SUBSONIC_OUTLET           (Subsonic outlet, avaliable parameter lists:\n";
+    out << "#                                   1. pressure) \n";
     out << "# =============================================================================\n\n";
 
     for (std::size_t p = 0; p < n_patches; ++p) {

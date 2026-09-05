@@ -13,6 +13,7 @@
 #include "cfd/solver/time/forward_euler.hpp"
 #include "cfd/solver/turbulence/spalart_allmaras.hpp"
 #include "cfd/solver/time/ssp_rk3.hpp"
+#include "cfd/solver/time/implicit_euler.hpp"
 
 namespace cfd::solver {
 
@@ -31,6 +32,10 @@ int dispatch_time_scheme(const SolverConfig& cfg,
 
         case TimeScheme::SspRk3:
             return Solver<EosType, FluxType, ReconType, PhysType, time::SspRk3>(
+                cfg, bcfg, eos, phys, mp, comm).run();
+
+        case TimeScheme::BackwardEuler:
+            return Solver<EosType, FluxType, ReconType, PhysType, time::BackwardEuler>(
                 cfg, bcfg, eos, phys, mp, comm).run();
 
         default:

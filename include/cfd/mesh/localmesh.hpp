@@ -57,6 +57,7 @@ struct MeshPart {
     // --- Faces ---
     // Strict orientation constraint: normal always points from `face_owner` to `face_neigh`.
     LocalIndex n_faces = 0;
+    LocalIndex n_internal_faces = 0;
     LocalIndex n_inner_faces = 0;
     std::vector<LocalIndex> face_owner;          // Local index of the owned cell
     std::vector<LocalIndex> face_neigh;          // Local index (owned or ghost cell) or kInvalidLocalIndex if boundary
@@ -67,7 +68,7 @@ struct MeshPart {
     std::vector<double> face_centroid_x;
     std::vector<double> face_centroid_y;
     std::vector<double> face_centroid_z;
-    std::vector<double> face_normal_x;           
+    std::vector<double> face_normal_x;           // Outward normal (magnitude = area or normalized, specify later)
     std::vector<double> face_normal_y;
     std::vector<double> face_normal_z;
     std::vector<double> face_area;

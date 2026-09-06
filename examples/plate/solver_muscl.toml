@@ -30,5 +30,6 @@ residual_tolerance = 1.0e-10
 
 [output]
 directory = "out/plate_muscl"
-field_interval = 1000
-residual_interval = 250
+field_interval = 25000
+residual_interval = 5000
+

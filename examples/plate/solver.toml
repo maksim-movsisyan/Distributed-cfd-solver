@@ -23,10 +23,10 @@ reconstruction = "FIRST_ORDER"
 [time]
 scheme = "FORWARD_EULER"
 cfl = 1.0
-max_iterations = 10000
+max_iterations = 100000
 residual_tolerance = 1.0e-10
 
 [output]
 directory = "out/plate"
-field_interval = 1000
-residual_interval = 250
+field_interval = 25000
+residual_interval = 5000

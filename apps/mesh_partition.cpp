@@ -133,25 +133,6 @@ int main(int argc, char** argv) {
     //    key, global 1-based element id). NOTE: surface elements are
     //    block-split independently PER SECTION, so this slice is unrelated
     //    to the cell/node ownership above.
-    //
-    // PERF WARNING: boundary condition metadata (cg_boco_info/cg_boco_read/
-    // cg_goto+cg_famname_read) is read independently and redundantly by
-    // EVERY rank. The tree traversal in cg_goto/cg_famname_read (not
-    // cg_boco_read itself) is the likely cost driver at scale.
-    // Known bottleneck on Lustre/GPFS-style filesystems once nprocs is in
-    // the many-hundreds/thousands range (small independent metadata
-    // requests hammer the MDS). Not an issue at current scale.
-    //
-    // Fix: read once on rank 0, MPI_Bcast the packed BCMeta list to all
-    // ranks. m->bcs stays a replicated vector<BCMeta> on every rank either
-    // way, so this is a drop-in internal change — no RawMesh/API changes
-    // needed.
-    //
-    // CAVEAT before implementing: fatal()/check() currently run identically
-    // on all ranks, so a malformed file aborts symmetrically everywhere.
-    // After rank-0-only reading, verify fatal() does a collective
-    // MPI_Abort(comm, ...) — otherwise a bad file kills only rank 0 and
-    // every other rank hangs forever on the Bcast.
     cfd::mesh::RawMesh m = cfd::io::cgns::read_cgns_parallel(in, MPI_COMM_WORLD);
 
 
@@ -172,12 +153,13 @@ int main(int argc, char** argv) {
     //
     // Algorithm Overview (2-Phase Rendezvous / Owner-Compute Scheme):
     //
-    //  Phase 1: Generation & Geometric Rendezvous Dispatch
+    //  Phase 1: Generation & Hash-Based Rendezvous Dispatch
     //   - Every rank iterates over its local volume cells, extracts canonical
     //     sub-faces using CGNS lookup tables, and builds a sorted 4-node `FaceKey`.
     //   - Every rank takes its local slice of `surf_elems` (containing BC PatchIds).
-    //   - A rendezvous destination rank is computed for every face via
-    //     `find_owner_rank(min(FaceKey.nodes), m.node_displ)`.
+    //   - A rendezvous destination rank is computed deterministically via
+    //     `FaceKeyHash(FaceKey) % nprocs`, guaranteeing uniform O(N_faces / P) memory
+    //     and network distribution across all ranks (prevents incast / skew on rank 0).
     //   - All half-faces and surface elements are packed and dispatched using
     //     a single `MPI_Alltoallv` exchange.
     //
@@ -220,7 +202,7 @@ int main(int argc, char** argv) {
     // process placement.
     //
     // MUST be called collectively by all ranks in `m.comm` (uses MPI collective
-    // topology discovery, dKaMinPar distributed solver, and MPI-Alltoallv internally) —
+    // topology discovery, dKaMinPar distributed solver, and MPI_Allreduce internally) —
     // calling it on a subset of ranks will deadlock.
     //
     // Preconditions:
@@ -238,21 +220,23 @@ int main(int argc, char** argv) {
     //     to construct an optimal continuous block-to-hardware mapping (`part2rank`).
     //
     //  Step 2: Distributed CSR Formatting for dKaMinPar
-    //   - Converts local CSR graph offsets and adjacencies into zero-copy 64-bit
+    //   - Converts local CSR graph offsets and adjacencies into 64-bit
     //     distributed node/edge arrays (`vtxdist`, `xadj`, `adjncy`).
     //
     //  Step 3: Distributed Multi-Level Graph Partitioning
-    //   - Invokes dKaMinPar with recursive bisection to partition the dual graph
+    //   - Invokes dKaMinPar with deep recursive bisection to partition the dual graph
     //     into `P` balanced subdomains minimizing global edge cuts;
+    //   - Immediately frees temporary CSR buffers to drop memory pressure before
+    //     running the heavy solver phases;
     //   - Maps raw partition block IDs to physical MPI ranks using the topology table,
     //     guaranteeing that topologically adjacent blocks (0..K-1) are assigned to
     //     cores on the SAME physical server (Node 0), eliminating network traffic.
     //
-    //  Step 4: Distributed Cut Verification & Network Traffic Analysis
-    //   - Performs a lightweight 1-round halo exchange across partition boundaries
-    //     to resolve target ranks for ghost neighbours;
-    //   - Computes both total `global_edge_cut` and `inter_node_cut` (edges that
-    //     actually cross physical Ethernet/InfiniBand cables) for HPC diagnostics.
+    //  Step 4: Distributed Diagnostics & Load Balance Reduction
+    //   - Retrieves exact `global_edge_cut` directly from the partitioner without
+    //     redundant distributed halo exchanges;
+    //   - Computes global cell distribution statistics (min/avg/max cells per rank
+    //     and overall imbalance %) via a single lightweight `MPI_Allreduce`.
     //
     // After this call, each rank holds `cfd::partition::PartitionResult`:
     //  - `result.cell_target_rank`: array of size `n_local_cells` defining the target
@@ -261,8 +245,7 @@ int main(int argc, char** argv) {
     //    (used to dispatch cell packages during data migration);
     //  - `result.rank2part`: inverse bijection mapping MPI Rank -> Assigned PartitionBlockId
     //    (used to compute exact deterministic byte offsets in the solver binary file);
-    //  - `result.global_edge_cut`: total face cuts across all MPI rank boundaries;
-    //  - `result.inter_node_cut`: face cuts crossing physical server chassis.
+    //  - `result.global_edge_cut`: total face cuts across all MPI rank boundaries.
     cfd::partition::PartitionResult pr = cfd::partition::partition_cells(
         m, 
         dual_graph.graph, 
@@ -365,7 +348,7 @@ int main(int argc, char** argv) {
     //  1. Cell Metrics:
     //     - Centroids: Computed as the arithmetic mean of cell vertices for all [0, n_cells) cells;
     //     - Volumes: Calculated via Gauss' Divergence Theorem over polyhedral boundary faces
-    //       (supports arbitrary mixed topologies: TET, PYRA, PRISM, HEXA).
+    //       (supports arbitrary mixed topologies: TET, PYRA, PRISM, HEXA, MIXED).
     //     - Positivity Guarantee: Asserts volume $V > 10^{-15}$ for all cells; aborts with a diagnostic
     //       dump if degenerate or inverted elements are detected.
     //
@@ -388,7 +371,8 @@ int main(int argc, char** argv) {
     cfd::mesh::compute_mesh_geometry(mp);
 
 
-    // Local cell and face reordering for CPU cache locality, branch elimination, and matrix bandwidth.
+    // Local cell and face reordering for CPU cache locality, branch elimination, matrix bandwidth,
+    // and non-blocking communication-computation overlap.
     //
     // Optimizes memory access patterns for owned cells [0, n_own):
     //  - HILBERT_SFC: 3D Space-Filling Curve (optimal L1/L2 cache spatial locality for Explicit solvers);
@@ -397,13 +381,17 @@ int main(int argc, char** argv) {
     // Guarantees & Invariants:
     //  - Preserves ghost layer contiguous layout intact [n_own, n_cells);
     //  - Automatically updates `send_owned_local` communication indices;
-    //  - Partitions and sorts the face array into two contiguous sections:
-    //      1. Interior faces [0, n_inner_faces): sorted monotonically by (owner, neigh)
-    //         for branchless SIMD/AVX flux loops and linear prefetching;
-    //      2. Boundary faces [n_inner_faces, n_faces): grouped contiguously by `patch_id`,
-    //         then sorted by `owner` cell index for vectorized BC evaluations;
+    //  - Partitions and sorts the face array into three contiguous zones:
+    //      1. Pure internal faces [0, n_internal_faces): owner < n_own, neigh < n_own.
+    //         Sorted monotonically by (owner, neigh) for branchless SIMD/AVX flux loops,
+    //         allowing immediate local evaluation while asynchronous MPI halo exchanges are in flight;
+    //      2. Coupled / Inter-rank faces [n_internal_faces, n_inner_faces): owner < n_own, neigh >= n_own.
+    //         Sorted by (owner, neigh) for cache locality, evaluated immediately after MPI_Waitall;
+    //      3. Boundary faces [n_inner_faces, n_faces): neigh == -1.
+    //         Grouped contiguously by `patch_id`, then sorted by `owner` cell index for vectorized BC evaluations;
     //  - Reconstructs flat CSR boundary patch tables (`patch_face_offsets`, `patch_faces`);
-    //  - Sets `mp.n_inner_faces` to the exact count of interior faces.
+    //  - Sets `mp.n_internal_faces` to the exact count of pure internal faces;
+    //  - Sets `mp.n_inner_faces` to the total count of internal and inter-rank coupled faces (offset where boundary patches begin).
     cfd::mesh::reorder_local_mesh(mp, reorder_m);
 
 

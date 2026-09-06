@@ -353,21 +353,6 @@ target_link_libraries(
         cfd_solver_mesh_io          
 )
 
-    #=============================
-    #=== PARTITIONED MESH READ ===
-    #=============================
-add_executable(solver_mesh_check apps/solver_mesh_check.cpp)
-
-target_link_libraries(
-    solver_mesh_check
-    PRIVATE
-    cfd_project_warnings
-    cfd_project_options
-
-    cfd_mpi
-    cfd_mesh
-    cfd_solver_mesh_io
-)
 
     #=============================
     #=== FLOW SOLVER =============

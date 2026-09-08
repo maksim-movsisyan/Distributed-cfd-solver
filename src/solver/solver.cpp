@@ -9,18 +9,18 @@
 #include "cfd/solver/reconstruction/first_order.hpp"
 #include "cfd/solver/reconstruction/muscl.hpp"
 #include "cfd/solver/reconstruction/muscl_directional.hpp"
-#include "cfd/solver/riemann/hllc.hpp"
+#include "cfd/solver/fluxes/hllc.hpp"
 #include "cfd/solver/time/forward_euler.hpp"
-#include "cfd/solver/turbulence/spalart_allmaras.hpp"
 #include "cfd/solver/time/ssp_rk3.hpp"
-#include "cfd/solver/time/implicit_euler.hpp"
+//#include "cfd/solver/time/implicit_euler.hpp"
+//#include "cfd/solver/turbulence/spalart_allmaras.hpp"
 
 namespace cfd::solver {
 
 // dispatch time integration scheme
 template <typename EosType, typename FluxType, typename ReconType, typename PhysType>
 int dispatch_time_scheme(const SolverConfig& cfg,
-                         const BoundaryConfig& bcfg,
+                         const bc::BoundaryConfig& bcfg,
                          const mesh::MeshPart& mp,
                          const MPI_Comm comm,
                          const EosType& eos,
@@ -34,9 +34,9 @@ int dispatch_time_scheme(const SolverConfig& cfg,
             return Solver<EosType, FluxType, ReconType, PhysType, time::SspRk3>(
                 cfg, bcfg, eos, phys, mp, comm).run();
 
-        case TimeScheme::BackwardEuler:
-            return Solver<EosType, FluxType, ReconType, PhysType, time::BackwardEuler>(
-                cfg, bcfg, eos, phys, mp, comm).run();
+        //case TimeScheme::BackwardEuler:
+        //    return Solver<EosType, FluxType, ReconType, PhysType, time::BackwardEuler>(
+        //        cfg, bcfg, eos, phys, mp, comm).run();
 
         default:
             mpi::fatal(comm, "dispatch: unknown time scheme");
@@ -48,7 +48,7 @@ int dispatch_time_scheme(const SolverConfig& cfg,
 template <typename EosType, typename FluxType, typename PhysType,
           template <typename> class MultidimRecon>
 int dispatch_multidim_limiter(const SolverConfig& cfg,
-                              const BoundaryConfig& bcfg,
+                              const bc::BoundaryConfig& bcfg,
                               const mesh::MeshPart& mp,
                               const MPI_Comm comm,
                               const EosType& eos,
@@ -79,7 +79,7 @@ int dispatch_multidim_limiter(const SolverConfig& cfg,
 template <typename EosType, typename FluxType, typename PhysType,
           template <typename> class DirectionalRecon>
 int dispatch_directional_limiter(const SolverConfig& cfg,
-                                 const BoundaryConfig& bcfg,
+                                 const bc::BoundaryConfig& bcfg,
                                  const mesh::MeshPart& mp,
                                  const MPI_Comm comm,
                                  const EosType& eos,
@@ -104,7 +104,7 @@ int dispatch_directional_limiter(const SolverConfig& cfg,
 // dispatch reconstruction type
 template <typename EosType, typename FluxType, typename PhysType>
 int dispatch_reconstruction(const SolverConfig& cfg,
-                            const BoundaryConfig& bcfg,
+                            const bc::BoundaryConfig& bcfg,
                             const mesh::MeshPart& mp,
                             const MPI_Comm comm,
                             const EosType& eos,
@@ -131,22 +131,22 @@ int dispatch_reconstruction(const SolverConfig& cfg,
 // dispatch riemann solver type
 template <typename EosType, typename PhysType>
 int dispatch_flux(const SolverConfig& cfg,
-                  const BoundaryConfig& bcfg,
+                  const bc::BoundaryConfig& bcfg,
                   const mesh::MeshPart& mp,
                   const MPI_Comm comm,
                   const EosType& eos,
                   const PhysType& phys) {
     switch (cfg.flux) {
         case FluxType::HLLC:
-            return dispatch_reconstruction<EosType, riemann::HllcFlux, PhysType>(
+            return dispatch_reconstruction<EosType, fluxes::HllcFlux, PhysType>(
                 cfg, bcfg, mp, comm, eos, phys);
 
         // case FluxType::Roe:
-        //     return dispatch_reconstruction<EosType, riemann::RoeFlux, PhysType>(
+        //     return dispatch_reconstruction<EosType, fluxes::RoeFlux, PhysType>(
         //         cfg, bcfg, mp, comm, eos, phys);
 
         // case FluxType::Rusanov:
-        //     return dispatch_reconstruction<EosType, riemann::RusanovFlux, PhysType>(
+        //     return dispatch_reconstruction<EosType, fluxes::RusanovFlux, PhysType>(
         //         cfg, bcfg, mp, comm, eos, phys);
 
         default:
@@ -158,20 +158,21 @@ int dispatch_flux(const SolverConfig& cfg,
 // dispatch physics: equation set + turbulence module (compile-time stack)
 template <typename EosType>
 int dispatch_physics(const SolverConfig& cfg,
-                     const BoundaryConfig& bcfg,
+                     const bc::BoundaryConfig& bcfg,
                      const mesh::MeshPart& mp,
                      const MPI_Comm comm,
                      const EosType& eos) {
     if (cfg.turbulence.enabled) {
-        using SaStack = physics::PhysicsStack<physics::ViscousFlow, turb::SpalartAllmaras>;
+        //using SaStack = physics::PhysicsStack<physics::ViscousFlow, turb::SpalartAllmaras>;
 
-        turb::SpalartAllmaras sa{};
-        sa.nu_inf_ratio = cfg.turbulence.nu_inf_ratio;
-        sa.max_distance_sweeps = cfg.turbulence.max_distance_sweeps;
-        sa.distance_tolerance = cfg.turbulence.distance_tolerance;
+        //turb::SpalartAllmaras sa{};
+        //sa.nu_inf_ratio = cfg.turbulence.nu_inf_ratio;
+        //sa.max_distance_sweeps = cfg.turbulence.max_distance_sweeps;
+        //sa.distance_tolerance = cfg.turbulence.distance_tolerance;
 
-        const SaStack phys{physics::ViscousFlow{cfg.prandtl}, std::tuple{sa}};
-        return dispatch_flux<EosType, SaStack>(cfg, bcfg, mp, comm, eos, phys);
+        //const SaStack phys{physics::ViscousFlow{cfg.prandtl}, std::tuple{sa}};
+        //return dispatch_flux<EosType, SaStack>(cfg, bcfg, mp, comm, eos, phys);
+        mpi::fatal(comm, "dispatch: turbulence not done yet :) ");
     }
 
     if (cfg.flow_model == FlowModel::ViscousFlow) {
@@ -194,7 +195,7 @@ int dispatch_physics(const SolverConfig& cfg,
 }
 
 int run_solver(const SolverConfig& cfg,
-               const BoundaryConfig& bcfg,
+               const bc::BoundaryConfig& bcfg,
                const mesh::MeshPart& mp,
                const MPI_Comm comm) {
     switch (cfg.flow.type) {

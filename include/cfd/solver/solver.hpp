@@ -17,7 +17,6 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
-#include <memory>
 #include <span>
 #include <string>
 #include <utility>
@@ -26,16 +25,18 @@
 #include "cfd/core/types.hpp"
 #include "cfd/io/vtk/vtu.hpp"
 #include "cfd/mesh/localmesh.hpp"
+#include "cfd/mesh/aux_connectivity.hpp"
+#include "cfd/mesh/aux_geometry.hpp"
 #include "cfd/mpi/log.hpp"
 #include "cfd/mpi/mpi_util.hpp"
 #include "cfd/solver/bc/bc_manager.hpp"
+#include "cfd/solver/bc/config.hpp"
 #include "cfd/solver/config.hpp"
 #include "cfd/solver/eos/eos_concept.hpp"
 #include "cfd/solver/eos/state_conversions.hpp"
 #include "cfd/solver/fields/fields_manager.hpp"
 #include "cfd/solver/fields/fields_view.hpp"
-#include "cfd/solver/gradient/gradient.hpp"
-#include "cfd/solver/gradient/lsq_gradient.hpp"
+#include "cfd/solver/gradient/gradient_manager.hpp"
 #include "cfd/solver/halo.hpp"
 #include "cfd/solver/physics/physics_concepts.hpp"
 #include "cfd/solver/reconstruction/reconstruction.hpp"
@@ -58,28 +59,33 @@ public:
                                          || PhysPolicy::kNeedsGradients;
     static constexpr bool kHasModules = PhysPolicy::kNumExtraVars > 0;
 
+    static constexpr mesh::AuxGeomType kAuxGeometry = ReconPolicy::kAuxGeometry|
+                                                      PhysPolicy::kAuxGeometry; 
+    static constexpr mesh::AuxConnType kAuxConnectivity = ReconPolicy::kAuxConnectivity|
+                                                          PhysPolicy::kAuxConnectivity; 
+
     Solver(const SolverConfig& cfg,
-           const BoundaryConfig& bcfg,
+           const bc::BoundaryConfig& bcfg,
            const EOS eos,
            const PhysPolicy phys,
-           const mesh::MeshPart& mp,
+           const mesh::MeshPart& mesh,
            const MPI_Comm comm)
-        : mp_(mp),
+        : mesh_(mesh),
           cfg_(cfg),
           eos_(eos),
           phys_(phys),
-          halo_(mp, comm),
-          kernel_(mp, eos, phys.kernel_physics()),
+          kernel_(mesh, this->aux_conn_, this->aux_geom_, eos, phys),
+          halo_(mesh, comm),
           comm_(comm) {
 
         // 1. Initialize boundary conditions
-        bcs_.initialize(bcfg, mp, eos_);
+        bcs_.initialize(bcfg, mesh, eos_);
 
         // 2. Allocate SoA storage in FieldsManager
-        const std::size_t n_inner  = static_cast<std::size_t>(mp_.n_inner_faces);
-        const std::size_t n_faces  = static_cast<std::size_t>(mp_.n_faces);
-        const std::size_t n_cells  = static_cast<std::size_t>(mp_.n_cells);
-        const std::size_t n_own    = static_cast<std::size_t>(mp_.n_own);
+        const std::size_t n_inner  = static_cast<std::size_t>(mesh.n_inner_faces);
+        const std::size_t n_faces  = static_cast<std::size_t>(mesh.n_faces);
+        const std::size_t n_cells  = static_cast<std::size_t>(mesh.n_cells);
+        const std::size_t n_own    = static_cast<std::size_t>(mesh.n_own);
         const std::size_t n_bfaces = n_faces - n_inner;
         const std::size_t n_total  = n_cells + n_bfaces;
 
@@ -116,17 +122,22 @@ public:
             mdot_.assign(n_faces, 0.0);
         }
 
-        // 6. Gradient method + module initialization (BCs, wall distance) +
+        // 6. Creat mesh auxiliary geometry and connectivity
+        aux_conn_.add_connectivity(mesh, kAuxConnectivity);
+        aux_geom_.add_geometry(mesh, kAuxGeometry);
+
+        // 7. Gradient method + module initialization (BCs, wall distance) +
         //    reconstruction geometry (mesh-fixed)
         if constexpr (kNeedsGradients) {
-            adjacency_ = gradient::build_vertex_adjacency(mp_);
-            grad_method_ = std::make_unique<gradient::LsqGradient>(mp_, adjacency_);
+            grad_mgr_.create_gradient(cfg.gradient); 
+            grad_mgr_.setup_gradient(mesh, aux_conn_);
+            grad_stride_ = n_total;
         }
         if constexpr (kHasModules) {
             phys_.set_freestream_state(cfg_.init_rho, cfg_.init_p);
-            phys_.template initialize<EOS>(mp_, bcfg, eos_, adjacency_, halo_, comm_);
+            phys_.template initialize<EOS>(mesh, aux_conn_, aux_geom_, bcfg, eos_, halo_, comm_);
         }
-        geom_ = ReconPolicy::build_geometry(mp_, cfg_.limiter_venkat_k);
+
     }
 
     int run() {
@@ -210,7 +221,7 @@ public:
      *        update-block state slots (u or a stage buffer).
      */
     void evaluate_residual(const std::span<double* const> state) noexcept {
-        const std::size_t n_own = static_cast<std::size_t>(mp_.n_own);
+        const std::size_t n_own = static_cast<std::size_t>(mesh_.n_own);
 
         // 1. Owned conservative states -> primitives
         const double* CFD_RESTRICT s0 = state[0];
@@ -231,28 +242,27 @@ public:
 
         // 3. Boundary condition ghosts on the primitive fields, then module
         //    variables (module inflow ghosts read the mean-flow ghost state)
-        bcs_.apply_all(q_view_, mp_);
+        bcs_.apply_all(q_view_, mesh_);
         if constexpr (kHasModules) {
-            phys_.apply_bcs(eos_, mp_);
+            phys_.apply_bcs(eos_, mesh_);
         }
 
         // 4. Module per-eval scratch (nu_tilde / density / eddy viscosity)
         //    before gradients: module LSQ consumes the nu_tilde scratch
         if constexpr (PhysPolicy::kHasEddyViscosity) {
-            phys_.pre_sweep(eos_, mp_);
+            phys_.pre_sweep(eos_, mesh_);
         }
 
         // 5. Gradients and limiters over owned cells + BCs + packed MPI exchange
         if constexpr (kNeedsGradients) {
-            grad_method_->compute(q_view_.as_const(), grad_view_);
-            bcs_.apply_grad_all(q_view_.as_const(), grad_view_, mp_);
+            grad_mgr_.apply_gradient_set(q_slots_, grad_slots_, grad_stride_, mesh_, aux_conn_);
+            bcs_.apply_grad_all(q_view_.as_const(), grad_view_, mesh_);
             if constexpr (ReconPolicy::kNeedsGradients) {
-                ReconPolicy::compute_limiters(mp_, q_view_.as_const(),
-                                              grad_view_.as_const(), adjacency_,
-                                              geom_, phi_view_);
+                ReconPolicy::compute_limiters(mesh_, aux_conn_, q_view_.as_const(),
+                                              grad_view_.as_const(), phi_view_, cfg_.limiter_venkat_k);
             }
             if constexpr (kHasModules) {
-                phys_.compute_gradients(*grad_method_, mp_);
+                phys_.compute_gradients(grad_mgr_, mesh_);
             }
             halo_.exchange_grad_limiters();
         }
@@ -260,25 +270,24 @@ public:
         // 6. Mean-flow flux sweeps on the reconstructed primitive states
         //    (stores the face mass flux for module convection when requested)
         kernel_.apply(q_view_.as_const(), grad_view_.as_const(), phi_view_.as_const(),
-                      geom_, res_view_, lam_.data(), mut_ptr(),
+                      res_view_, lam_.data(), mut_ptr(),
                       PhysPolicy::kNeedsFaceMdot ? mdot_.data() : nullptr);
 
         // 7. Module convection + diffusion (upwind on the shared mass flux)
         if constexpr (PhysPolicy::kNeedsFaceMdot) {
-            phys_.face_sweep(eos_, mp_, lam_.data(), mdot_.data(),
-                             kernel_.phys_geometry());
+            phys_.face_sweep(eos_, mesh_, aux_conn_, aux_geom_, lam_.data(), mdot_.data());
         }
 
         // 8. Module source terms (production / destruction)
         if constexpr (kHasModules) {
-            phys_.cell_sources(eos_, mp_, grad_view_.as_const());
+            phys_.cell_sources(eos_, mesh_, grad_view_.as_const());
         }
     }
 
     void compute_dt() noexcept {
-        const auto n_own = static_cast<std::size_t>(mp_.n_own);
+        const std::size_t n_own = static_cast<std::size_t>(mesh_.n_own);
         const double* CFD_RESTRICT lam = lam_.data();
-        const double* CFD_RESTRICT vol = mp_.cell_volume.data();
+        const double* CFD_RESTRICT vol = mesh_.cell_volume.data();
         double* CFD_RESTRICT dt        = dt_.data();
         double* CFD_RESTRICT alpha     = alpha_.data();
 
@@ -298,7 +307,7 @@ public:
 
     [[nodiscard]] const double* alpha() const noexcept { return alpha_.data(); }
     [[nodiscard]] std::size_t n_owned() const noexcept {
-        return static_cast<std::size_t>(mp_.n_own);
+        return static_cast<std::size_t>(mesh_.n_own);
     }
 
     /** @brief Swaps the primary and stage state slots (ping-pong buffers). */
@@ -313,131 +322,14 @@ public:
 
     // --- Implicit-scheme services (consumed by implicit time policies) --------
 
-    [[nodiscard]] const mesh::MeshPart& mesh() const noexcept { return mp_; }
+    [[nodiscard]] const mesh::MeshPart& mesh() const noexcept { return mesh_; }
     [[nodiscard]] MPI_Comm mpi_comm() const noexcept { return comm_; }
     [[nodiscard]] const SolverConfig& config() const noexcept { return cfg_; }
     /** @brief Local time step per owned cell [0, n_own). */
     [[nodiscard]] const double* local_dt() const noexcept { return dt_.data(); }
 
-    /**
-     * @brief Assembles dR/dU of the mean flow into `sink`
-     *        (sink.add_block(row_cell, col_cell, scale, block5x5), mesh cell
-     *        ids). Call after evaluate_residual of the same state so the
-     *        gathered primitives (halos + BC ghosts) are current.
-     *
-     * Interior faces: first-order flux Jacobians (ResidualKernel). Boundary
-     * faces: exact derivative through the discrete BC ghost response.
-     */
-    template <typename JacobianSink>
-    void assemble_mean_flow_jacobian(JacobianSink& sink) noexcept {
-        kernel_.assemble_jacobian(q_view_.as_const(), sink);
-        assemble_boundary_jacobian(sink);
-    }
-
 private:
     // --- Memory Allocation, Views & Slot Binding ------------------------------
-
-    /**
-     * @brief Boundary-face blocks dF_b/dU_c0 through the ACTUAL BC ghost
-     *        response: perturb every owned conserved state in one component,
-     *        let the real BC machinery recompute the ghosts (each ghost depends
-     *        only on its face's interior cell, so a global direction cleanly
-     *        separates per-cell responses) and central-difference the boundary
-     *        fluxes. Cost: 10 cheap sweeps — primitive conversions, one BC
-     *        ghost pass and one flux per boundary face each. Exact w.r.t. the
-     *        discrete BCs, no duplication of BC formulas.
-     */
-    template <typename JacobianSink>
-    void assemble_boundary_jacobian(JacobianSink& sink) noexcept {
-        constexpr int N = PhysPolicy::kNumVars;
-        const std::size_t n_own = static_cast<std::size_t>(mp_.n_own);
-        const std::size_t n_inner = static_cast<std::size_t>(mp_.n_inner_faces);
-        const std::size_t n_faces = static_cast<std::size_t>(mp_.n_faces);
-        const std::size_t n_cells = static_cast<std::size_t>(mp_.n_cells);
-        const std::size_t n_bfaces = n_faces - n_inner;
-        if (n_bfaces == 0) return;
-
-        const LocalIndex* CFD_RESTRICT owner = mp_.face_owner.data();
-        const double* CFD_RESTRICT nx = mp_.face_normal_x.data();
-        const double* CFD_RESTRICT ny = mp_.face_normal_y.data();
-        const double* CFD_RESTRICT nz = mp_.face_normal_z.data();
-        const double* CFD_RESTRICT area = mp_.face_area.data();
-
-        // Unperturbed conserved states and per-component FD steps.
-        std::vector<double> u0(n_own * N);
-        std::vector<double> eps(n_own * N);
-        for (std::size_t c = 0; c < n_own; ++c) {
-            eos::primitives_pT_to_conserved(eos_, q_view_.prs[c], q_view_.vx[c], q_view_.vy[c],
-                                            q_view_.vz[c], q_view_.tmp[c], &u0[c * N]);
-            for (int k = 0; k < N; ++k) {
-                eps[c * N + k] = 1.0e-6 * (std::fabs(u0[c * N + k]) + 1.0);
-            }
-        }
-
-        std::vector<double> fp(n_bfaces * N), fm(n_bfaces * N);
-        double U[2 * N];
-        double F[N];
-
-        for (int k = 0; k < N; ++k) {
-            for (int sgn : {+1, -1}) {
-                // Owned primitives from the perturbed conserved state.
-                for (std::size_t c = 0; c < n_own; ++c) {
-                    for (int v = 0; v < N; ++v) {
-                        U[v] = u0[c * N + v];
-                    }
-                    U[k] += sgn * eps[c * N + k];
-                    eos::conserved_to_primitives_pT(eos_, U, q_view_.prs[c], q_view_.vx[c],
-                                                    q_view_.vy[c], q_view_.vz[c],
-                                                    q_view_.tmp[c]);
-                }
-                bcs_.apply_all(q_view_, mp_);  // ghosts from perturbed interiors
-
-                std::vector<double>& fs = (sgn > 0) ? fp : fm;
-                for (std::size_t f = n_inner; f < n_faces; ++f) {
-                    const std::size_t b = f - n_inner;
-                    const std::size_t c0 = static_cast<std::size_t>(owner[f]);
-                    const std::size_t cg = n_cells + b;
-                    double UL[N], UR[N];
-                    eos::primitives_pT_to_conserved(eos_, q_view_.prs[c0], q_view_.vx[c0],
-                                                    q_view_.vy[c0], q_view_.vz[c0],
-                                                    q_view_.tmp[c0], UL);
-                    eos::primitives_pT_to_conserved(eos_, q_view_.prs[cg], q_view_.vx[cg],
-                                                    q_view_.vy[cg], q_view_.vz[cg],
-                                                    q_view_.tmp[cg], UR);
-                    // Smooth surrogate flux: the FD must stay differentiable
-                    // through the HLLC branch boundaries (see face_flux_jacobian).
-                    FluxPolicy::rusanov_face_flux(eos_, UL, UR, nx[f], ny[f], nz[f], area[f], F);
-                    for (int i = 0; i < N; ++i) {
-                        fs[b * N + i] = F[i];
-                    }
-                }
-            }
-        }
-
-        // Restore the unperturbed primitives (the next evaluate_residual would
-        // rebuild them; this keeps q consistent within the step).
-        for (std::size_t c = 0; c < n_own; ++c) {
-            eos::conserved_to_primitives_pT(eos_, &u0[c * N], q_view_.prs[c], q_view_.vx[c],
-                                            q_view_.vy[c], q_view_.vz[c], q_view_.tmp[c]);
-        }
-        bcs_.apply_all(q_view_, mp_);
-
-        // Per-face diagonal blocks; a cell owning several boundary faces
-        // simply accumulates several blocks.
-        double dB[N * N];
-        for (std::size_t f = n_inner; f < n_faces; ++f) {
-            const std::size_t b = f - n_inner;
-            const std::size_t c0 = static_cast<std::size_t>(owner[f]);
-            for (int kk = 0; kk < N; ++kk) {
-                const double inv_2h = 1.0 / (2.0 * eps[c0 * N + kk]);
-                for (int i = 0; i < N; ++i) {
-                    dB[i * N + kk] = (fp[b * N + i] - fm[b * N + i]) * inv_2h;
-                }
-            }
-            sink.add_block(owner[f], owner[f], 1.0, dB);
-        }
-    }
-
     void allocate_fields(const std::size_t n_total) {
         // Primary State U & Q
         mgr_.add_field<double>("rho",  n_total, fields::FieldLocation::Cell);
@@ -500,6 +392,8 @@ private:
             mgr_.get_required_field_ptr<double>("tmp")
         };
 
+        q_slots_ = {q_view_.prs, q_view_.vx, q_view_.vy, q_view_.vz, q_view_.tmp};
+
         res_view_ = {
             mgr_.get_required_field_ptr<double>("res1"),
             mgr_.get_required_field_ptr<double>("res2"),
@@ -555,6 +449,9 @@ private:
                 mgr_.get_required_field_ptr<double>("grad_vz"),
                 mgr_.get_required_field_ptr<double>("grad_tmp")
             };
+
+            grad_slots_ = {grad_view_.prs_grad, grad_view_.vx_grad, grad_view_.vy_grad, grad_view_.vz_grad, grad_view_.tmp_grad};
+
             phi_view_ = {
                 mgr_.get_required_field_ptr<double>("phi_prs"),
                 mgr_.get_required_field_ptr<double>("phi_vx"),
@@ -619,7 +516,7 @@ private:
 
     void residual_norms(std::array<double, PhysPolicy::kNumVars>& l2) const noexcept {
         std::array<double, PhysPolicy::kNumVars> local{};
-        const std::size_t n_own = static_cast<std::size_t>(mp_.n_own);
+        const std::size_t n_own = static_cast<std::size_t>(mesh_.n_own);
 
         for (std::size_t c = 0; c < n_own; ++c) {
             local[0] += res_view_.res1[c] * res_view_.res1[c];
@@ -630,7 +527,7 @@ private:
         }
 
         MPI_Allreduce(local.data(), l2.data(), PhysPolicy::kNumVars, MPI_DOUBLE, MPI_SUM, comm_);
-        const double scale = 1.0 / static_cast<double>(std::max<GlobalIndex>(mp_.n_cells_g, 1));
+        const double scale = 1.0 / static_cast<double>(std::max<GlobalIndex>(mesh_.n_cells_g, 1));
         for (auto& val : l2) {
             val = std::sqrt(val * scale);
         }
@@ -661,7 +558,7 @@ private:
     }
 
     void refresh_primitives_for_audit() {
-        const auto n_own = static_cast<std::size_t>(mp_.n_own);
+        const std::size_t n_own = static_cast<std::size_t>(mesh_.n_own);
         auto u = u_view();
 
         for (std::size_t c = 0; c < n_own; ++c) {
@@ -674,21 +571,20 @@ private:
                                             q_view_.tmp[c]);
         }
         halo_.exchange_fields();
-        bcs_.apply_all(q_view_, mp_);
+        bcs_.apply_all(q_view_, mesh_);
         if constexpr (kHasModules) {
-            phys_.apply_bcs(eos_, mp_);
+            phys_.apply_bcs(eos_, mesh_);
         }
 
         if constexpr (kNeedsGradients) {
-            grad_method_->compute(q_view_.as_const(), grad_view_);
-            bcs_.apply_grad_all(q_view_.as_const(), grad_view_, mp_);
+            grad_mgr_.apply_gradient_set(q_slots_, grad_slots_, grad_stride_, mesh_, aux_conn_);
+            bcs_.apply_grad_all(q_view_.as_const(), grad_view_, mesh_);
             if constexpr (ReconPolicy::kNeedsGradients) {
-                ReconPolicy::compute_limiters(mp_, q_view_.as_const(),
-                                              grad_view_.as_const(), adjacency_,
-                                              geom_, phi_view_);
+                ReconPolicy::compute_limiters(mesh_, aux_conn_, q_view_.as_const(),
+                                              grad_view_.as_const(), phi_view_, cfg_.limiter_venkat_k);
             }
             if constexpr (kHasModules) {
-                phys_.compute_gradients(*grad_method_, mp_);
+                phys_.compute_gradients(grad_mgr_, mesh_);
             }
         }
     }
@@ -699,7 +595,7 @@ private:
 
         refresh_primitives_for_audit();
         kernel_.boundary_integrals(q_view_.as_const(), grad_view_.as_const(),
-                                   phi_view_.as_const(), geom_, mass, energy, mut_ptr());
+                                   phi_view_.as_const(), mass, energy, mut_ptr());
 
         const auto n = static_cast<int>(mass.size());
         std::vector<double> gmass(static_cast<std::size_t>(n));
@@ -711,7 +607,7 @@ private:
         for (std::size_t p = 0; p < gmass.size(); ++p) {
             mpi::log_stat("  patch %lld '%s': mass flux %+.6e kg/s, energy flux %+.6e W",
                           static_cast<long long>(p),
-                          mp_.patches[p].name.c_str(),
+                          mesh_.patches[p].name.c_str(),
                           gmass[p], genergy[p]);
         }
     }
@@ -723,7 +619,7 @@ private:
     }
 
     void write_fields(const std::string& stem) const {
-        const auto n_own = static_cast<std::size_t>(mp_.n_own);
+        const auto n_own = static_cast<std::size_t>(mesh_.n_own);
         std::vector<double> rho(n_own), vx(n_own), vy(n_own), vz(n_own), pr(n_own), mach(n_own);
 
         const auto u = u_view();
@@ -759,31 +655,28 @@ private:
             phys_.append_output(fields);
         }
 
-        io::vtk::write_solution_vtu(mp_, fields.data(),
+        io::vtk::write_solution_vtu(mesh_, fields.data(),
                                     static_cast<int>(fields.size()),
                                     cfg_.output_dir, stem, comm_);
     }
 
     // --- State Members ------------------------------------------------------
 
-    const mesh::MeshPart& mp_;
+    const mesh::MeshPart& mesh_;
+    mesh::MeshAuxGeometry aux_geom_;
+    mesh::MeshAuxConnectivity aux_conn_;
     SolverConfig cfg_;
     EOS eos_;
     PhysPolicy phys_;
+    ResidualKernel<EOS, FluxPolicy, ReconPolicy, PhysPolicy> kernel_;
     bc::BoundaryManager<EOS> bcs_;
     halo::HaloExchanger halo_;
 
-    // The mean-flow kernel sees only the base equation set, augmented with
-    // stack-level service flags (face mass flux) through PhysicsStack::
-    // KernelPhysics — it stays fully decoupled from module machinery.
-    ResidualKernel<EOS, FluxPolicy, ReconPolicy, typename PhysPolicy::KernelPhysics> kernel_;
-    
     TimePolicy time_{};
     MPI_Comm comm_{MPI_COMM_WORLD};
 
-    gradient::VertexAdjacency adjacency_;
-    std::unique_ptr<gradient::GradientMethod> grad_method_;
-    typename ReconPolicy::Geometry geom_;
+    gradient::GradientManager grad_mgr_;
+    std::size_t grad_stride_{0};
 
     fields::FieldsManager mgr_;
     fields::PrimitiveView<double> q_view_{};
@@ -792,6 +685,8 @@ private:
     fields::PrimitiveView<double> phi_view_{};
 
     // Update-block slot registry: [variable][role] pointer table
+    std::vector<const double*> q_slots_;
+    std::vector<double*> grad_slots_;
     std::vector<double*> u_slots_;
     std::vector<double*> prev_slots_;
     std::vector<double*> stage_slots_;
@@ -812,7 +707,7 @@ private:
 };
 
 int run_solver(const SolverConfig& cfg,
-               const BoundaryConfig& bcfg,
+               const bc::BoundaryConfig& bcfg,
                const mesh::MeshPart& mp,
                MPI_Comm comm);
 

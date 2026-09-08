@@ -6,6 +6,8 @@
 #include <cstddef>
 
 #include "cfd/mesh/localmesh.hpp"
+#include "cfd/mesh/aux_geometry.hpp"
+#include "cfd/mesh/aux_connectivity.hpp"
 #include "cfd/solver/reconstruction/reconstruction.hpp"
 
 namespace cfd::solver::recon {
@@ -16,28 +18,24 @@ namespace cfd::solver::recon {
  */
 struct FirstOrder {
     static constexpr bool kNeedsGradients = false;
-
+    static constexpr mesh::AuxGeomType kAuxGeometry = mesh::AuxGeomType::None;
+    static constexpr mesh::AuxConnType kAuxConnectivity = mesh::AuxConnType::None;
     static constexpr const char* name() noexcept { return "FIRST_ORDER"; }
     static constexpr const char* limiter_name() noexcept { return "NONE"; }
 
-    /**
-     * @brief Empty geometry placeholder (0 bytes in execution, fully elided by compiler).
-     */
-    struct Geometry {
-        Geometry() = default;
-        explicit Geometry(const mesh::MeshPart& /*mp*/) noexcept {}
-    };
-
-    [[nodiscard]] static Geometry build_geometry(const mesh::MeshPart& mp,
-                                                 const double /*venkat_k*/ = 0.0) noexcept {
-        return Geometry(mp);
-    }
-
+    static inline void compute_limiters(const mesh::MeshPart& /*mesh*/,
+                                    const mesh::MeshAuxConnectivity& /*aux_conn*/,
+                                    fields::ConstPrimitiveView /*q*/,
+                                    fields::ConstPrimitiveGradView /*grad*/,
+                                    fields::PrimitiveView<double> /*phi*/,
+                                    const double /*venkat_k = 1.0*/) noexcept {}
+                                    
     /**
      * @brief Gather primitive states on interior faces [0, n_inner_faces).
      */
-    static void face_states(const ReconField& s,
-                            const Geometry& /*g*/,
+    static inline void face_states(const ReconField& s,
+                            const mesh::MeshPart& /*mesh*/,
+                            const mesh::MeshAuxGeometry& /*aux_geom*/,
                             const std::size_t /*f*/,
                             const std::size_t c0,
                             const std::size_t c1,
@@ -59,14 +57,15 @@ struct FirstOrder {
     /**
      * @brief Gather primitive states on boundary faces [n_inner_faces, n_faces).
      */
-    static void boundary_face_states(const ReconField& s,
-                                     const Geometry& g,
+    static inline void boundary_face_states(const ReconField& s,
+                                     const mesh::MeshPart& mesh,
+                                     const mesh::MeshAuxGeometry& aux_geom,
                                      const std::size_t f,
                                      const std::size_t c0,
                                      const std::size_t cg,
                                      double qL[constants::kNumVars],
                                      double qR[constants::kNumVars]) noexcept {
-        face_states(s, g, f, c0, cg, qL, qR);
+        face_states(s, mesh, aux_geom, f, c0, cg, qL, qR);
     }
 };
 

@@ -10,42 +10,12 @@
 #include <array>
 #include <cstdint>
 #include <string>
-#include <vector>
 
 #include "cfd/core/types.hpp"
-#include "cfd/mesh/localmesh.hpp"
+#include "cfd/solver/gradient/gradient_manager.hpp"
 #include "cfd/solver/eos/ideal_gas.hpp"
-#include "cfd/solver/bc/bc.hpp"
 
 namespace cfd::solver {
-
-// --- Boundary conditions ----------------------------------------------------
-// One parsed [[boundary_condition]] table.
-struct BCDescriptor {
-    bc::BCType type = bc::BCType::Symmetry;
-    bc::InflowMode inflow_mode{bc::InflowMode::Velocity};
-    int patch_id = -1;
-
-    // pressure and temperature
-    double p{constants::kIsaPressure};
-    double t{constants::kIsaTemperature};
-    double tmp_grad{0.0}; ///< Normal temperature gradient dT/dn [K/m]
-
-    // velocity vector
-    std::array<double, 3> velocity{0.0, 0.0, 0.0};
-
-    // mach number, angel of atack, slip angel and direction vector
-    double mach{0.0};
-    double alpha_deg{0.0};
-    double beta_deg{0.0};
-    std::array<double, 3> direction{1.0, 0.0, 0.0};
-    
-};
-
-struct BoundaryConfig {
-    // Exactly one entry per mesh patch, indexed strictly by patch_id [0, n_patches)
-    std::vector<BCDescriptor> patches;
-};
 
 // --- Equation of state -------------------------------------------------------
 
@@ -68,10 +38,14 @@ struct EqOfStateConfig {
     }
 };
 
+
+// --- Mean flow model ---------------------------------------------------------
+
 enum class FlowModel {
     InviscidFlow,
     ViscousFlow
 };
+
 
 // --- Numerics / time / output ------------------------------------------------
 
@@ -113,6 +87,10 @@ enum class TurbulenceModel {
     SA
 };
 
+
+// --- Total config file --------------------------------------------------------
+
+
 struct SolverConfig {
     // [flow]
     EqOfStateConfig flow;
@@ -125,6 +103,7 @@ struct SolverConfig {
     std::array<double, 3> init_velocity = {0.0, 0.0, 0.0};
 
     // [numerics]
+    gradient::GradientType gradient = gradient::GradientType::GreenGaussFace;
     FluxType flux = FluxType::HLLC;
     ReconType reconstruction = ReconType::FirstOrder;
     LimiterType limiter = LimiterType::Venkatakrishnan;
@@ -152,12 +131,4 @@ struct SolverConfig {
 // Parses the solver configuration file. MUST be called collectively; any
 // violation aborts all ranks via mpi::fatal.
 SolverConfig parse_solver_config(const std::string& path, MPI_Comm comm);
-
-// Parses the boundary condition file and cross-validates it against the mesh:
-// every patch must carry exactly one condition and no unknown patch ids may
-// appear. MUST be called collectively.
-BoundaryConfig parse_boundary_config(const std::string& path,
-                                     const mesh::MeshPart& mp,
-                                     MPI_Comm comm);
-
 } // namespace cfd::solver

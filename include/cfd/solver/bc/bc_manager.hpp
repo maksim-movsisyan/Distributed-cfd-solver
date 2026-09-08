@@ -21,7 +21,7 @@
 #include "cfd/solver/bc/noslip_wall_heat_flux.hpp"
 #include "cfd/solver/bc/subsonic_inlet.hpp"
 #include "cfd/solver/bc/subsonic_outlet.hpp"
-#include "cfd/solver/config.hpp"
+#include "cfd/solver/bc/config.hpp"
 #include "cfd/solver/eos/eos_concept.hpp"
 #include "cfd/solver/fields/fields_view.hpp"
 

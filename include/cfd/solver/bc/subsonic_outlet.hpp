@@ -31,17 +31,26 @@ inline void subsonic_outlet_kernel(fields::PrimitiveView<double> s,
                                    const LocalIndex fbeg,
                                    const LocalIndex fend,
                                    const SubsonicOutletParams& p) noexcept {
+    const auto beg = static_cast<std::size_t>(fbeg);
+    const auto end = static_cast<std::size_t>(fend);
+    if (beg >= end) return;
+
     const auto n_cells = static_cast<std::size_t>(m.n_cells);
     const auto n_inner_faces = static_cast<std::size_t>(m.n_inner_faces);
-    std::size_t f_loc = static_cast<std::size_t>(fbeg) - n_inner_faces;
+    std::size_t f_loc = beg - n_inner_faces;
 
-    for (std::size_t face_idx = static_cast<std::size_t>(fbeg);
-         face_idx < static_cast<std::size_t>(fend); ++face_idx) {
-        const auto in = static_cast<std::size_t>(m.face_owner[face_idx]); // inner (real) cell
+    // Unpack topology array with restrict
+    const LocalIndex* CFD_RESTRICT face_owner = m.face_owner.data();
+
+    // Cache outlet backpressure in register
+    const double prs_outlet = p.prs_outlet;
+
+    for (std::size_t face_idx = beg; face_idx < end; ++face_idx) {
+        const auto in = static_cast<std::size_t>(face_owner[face_idx]); // inner (real) cell
         const auto gh = n_cells + f_loc;                                  // ghost cell
 
         // ==== 1. Fixed Dirichlet static backpressure: p_face = p_outlet ====
-        apply_fixed_value_bc(s.prs[gh], s.prs[in], p.prs_outlet);
+        apply_fixed_value_bc(s.prs[gh], s.prs[in], prs_outlet);
 
         // ==== 2. Extrapolate velocity components from interior (Neumann: dv/dn = 0) ====
         apply_extrapolation0_bc(s.vx[gh], s.vx[in]);
@@ -62,26 +71,46 @@ inline void subsonic_outlet_grad_kernel(fields::ConstPrimitiveView s,
                                         const LocalIndex fbeg,
                                         const LocalIndex fend,
                                         const SubsonicOutletParams& p) noexcept {
+    const auto beg = static_cast<std::size_t>(fbeg);
+    const auto end = static_cast<std::size_t>(fend);
+    if (beg >= end) return;
+
     const auto n_cells = static_cast<std::size_t>(m.n_cells);
     const auto n_inner_faces = static_cast<std::size_t>(m.n_inner_faces);
-    std::size_t f_loc = static_cast<std::size_t>(fbeg) - n_inner_faces;
+    std::size_t f_loc = beg - n_inner_faces;
 
-    for (std::size_t face_idx = static_cast<std::size_t>(fbeg);
-         face_idx < static_cast<std::size_t>(fend); ++face_idx) {
-        const auto in = static_cast<std::size_t>(m.face_owner[face_idx]);
+    // Unpack topology and metric arrays with restrict
+    const LocalIndex* CFD_RESTRICT face_owner = m.face_owner.data();
+    const double* CFD_RESTRICT nx_ptr         = m.face_normal_x.data();
+    const double* CFD_RESTRICT ny_ptr         = m.face_normal_y.data();
+    const double* CFD_RESTRICT nz_ptr         = m.face_normal_z.data();
+
+    const double* CFD_RESTRICT fcx_ptr = m.face_centroid_x.data();
+    const double* CFD_RESTRICT fcy_ptr = m.face_centroid_y.data();
+    const double* CFD_RESTRICT fcz_ptr = m.face_centroid_z.data();
+
+    const double* CFD_RESTRICT ccx_ptr = m.cell_centroid_x.data();
+    const double* CFD_RESTRICT ccy_ptr = m.cell_centroid_y.data();
+    const double* CFD_RESTRICT ccz_ptr = m.cell_centroid_z.data();
+
+    // Cache outlet backpressure in register
+    const double prs_outlet = p.prs_outlet;
+
+    for (std::size_t face_idx = beg; face_idx < end; ++face_idx) {
+        const auto in = static_cast<std::size_t>(face_owner[face_idx]);
         const auto gh = n_cells + f_loc;
 
-        const double nx = m.face_normal_x[face_idx];
-        const double ny = m.face_normal_y[face_idx];
-        const double nz = m.face_normal_z[face_idx];
+        const double nx = nx_ptr[face_idx];
+        const double ny = ny_ptr[face_idx];
+        const double nz = nz_ptr[face_idx];
 
-        const double fcx = m.face_centroid_x[face_idx];
-        const double fcy = m.face_centroid_y[face_idx];
-        const double fcz = m.face_centroid_z[face_idx];
+        const double fcx = fcx_ptr[face_idx];
+        const double fcy = fcy_ptr[face_idx];
+        const double fcz = fcz_ptr[face_idx];
 
-        const double ccx = m.cell_centroid_x[in];
-        const double ccy = m.cell_centroid_y[in];
-        const double ccz = m.cell_centroid_z[in];
+        const double ccx = ccx_ptr[in];
+        const double ccy = ccy_ptr[in];
+        const double ccz = ccz_ptr[in];
 
         const double rcfx = fcx - ccx;
         const double rcfy = fcy - ccy;
@@ -96,7 +125,7 @@ inline void subsonic_outlet_grad_kernel(fields::ConstPrimitiveView s,
         const double gz_in = s_grad.dprs_dz(in);
 
         apply_grad_fixed_value_bc(s_grad.dprs_dx(gh), s_grad.dprs_dy(gh), s_grad.dprs_dz(gh),
-                                  gx_in, gy_in, gz_in, s.prs[in], p.prs_outlet,
+                                  gx_in, gy_in, gz_in, s.prs[in], prs_outlet,
                                   nx, ny, nz, rcfn_inv);
 
         // ==== 2. Extrapolate velocity gradients ====

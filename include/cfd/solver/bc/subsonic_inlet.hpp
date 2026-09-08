@@ -85,25 +85,37 @@ inline void subsonic_inlet_kernel(fields::PrimitiveView<double> s,
                                   const LocalIndex fbeg,
                                   const LocalIndex fend,
                                   const SubsonicInletParams& p) noexcept {
+    const auto beg = static_cast<std::size_t>(fbeg);
+    const auto end = static_cast<std::size_t>(fend);
+    if (beg >= end) return;
+
     const auto n_cells = static_cast<std::size_t>(m.n_cells);
     const auto n_inner_faces = static_cast<std::size_t>(m.n_inner_faces);
-    std::size_t f_loc = static_cast<std::size_t>(fbeg) - n_inner_faces;
+    std::size_t f_loc = beg - n_inner_faces;
 
-    for (std::size_t face_idx = static_cast<std::size_t>(fbeg);
-         face_idx < static_cast<std::size_t>(fend); ++face_idx) {
-        const auto in = static_cast<std::size_t>(m.face_owner[face_idx]); // inner (real) cell
+    // Unpack topology array with restrict
+    const LocalIndex* CFD_RESTRICT face_owner = m.face_owner.data();
+
+    // Cache inlet parameters in registers
+    const double vx_inlet  = p.vx_inlet;
+    const double vy_inlet  = p.vy_inlet;
+    const double vz_inlet  = p.vz_inlet;
+    const double tmp_inlet = p.tmp_inlet;
+
+    for (std::size_t face_idx = beg; face_idx < end; ++face_idx) {
+        const auto in = static_cast<std::size_t>(face_owner[face_idx]); // inner (real) cell
         const auto gh = n_cells + f_loc;                                  // ghost cell
 
         // ==== 1. Extrapolate pressure from interior: dp/dn = 0 ====
         apply_extrapolation0_bc(s.prs[gh], s.prs[in]);
 
         // ==== 2. Fixed Dirichlet velocities ====
-        apply_fixed_value_bc(s.vx[gh], s.vx[in], p.vx_inlet);
-        apply_fixed_value_bc(s.vy[gh], s.vy[in], p.vy_inlet);
-        apply_fixed_value_bc(s.vz[gh], s.vz[in], p.vz_inlet);
+        apply_fixed_value_bc(s.vx[gh], s.vx[in], vx_inlet);
+        apply_fixed_value_bc(s.vy[gh], s.vy[in], vy_inlet);
+        apply_fixed_value_bc(s.vz[gh], s.vz[in], vz_inlet);
 
         // ==== 3. Fixed Dirichlet temperature ====
-        apply_fixed_value_bc(s.tmp[gh], s.tmp[in], p.tmp_inlet);
+        apply_fixed_value_bc(s.tmp[gh], s.tmp[in], tmp_inlet);
 
         ++f_loc;
     }
@@ -116,26 +128,49 @@ inline void subsonic_inlet_grad_kernel(fields::ConstPrimitiveView s,
                                        const LocalIndex fbeg,
                                        const LocalIndex fend,
                                        const SubsonicInletParams& p) noexcept {
+    const auto beg = static_cast<std::size_t>(fbeg);
+    const auto end = static_cast<std::size_t>(fend);
+    if (beg >= end) return;
+
     const auto n_cells = static_cast<std::size_t>(m.n_cells);
     const auto n_inner_faces = static_cast<std::size_t>(m.n_inner_faces);
-    std::size_t f_loc = static_cast<std::size_t>(fbeg) - n_inner_faces;
+    std::size_t f_loc = beg - n_inner_faces;
 
-    for (std::size_t face_idx = static_cast<std::size_t>(fbeg);
-         face_idx < static_cast<std::size_t>(fend); ++face_idx) {
-        const auto in = static_cast<std::size_t>(m.face_owner[face_idx]);
+    // Unpack topology and metric arrays with restrict
+    const LocalIndex* CFD_RESTRICT face_owner = m.face_owner.data();
+    const double* CFD_RESTRICT nx_ptr         = m.face_normal_x.data();
+    const double* CFD_RESTRICT ny_ptr         = m.face_normal_y.data();
+    const double* CFD_RESTRICT nz_ptr         = m.face_normal_z.data();
+
+    const double* CFD_RESTRICT fcx_ptr = m.face_centroid_x.data();
+    const double* CFD_RESTRICT fcy_ptr = m.face_centroid_y.data();
+    const double* CFD_RESTRICT fcz_ptr = m.face_centroid_z.data();
+
+    const double* CFD_RESTRICT ccx_ptr = m.cell_centroid_x.data();
+    const double* CFD_RESTRICT ccy_ptr = m.cell_centroid_y.data();
+    const double* CFD_RESTRICT ccz_ptr = m.cell_centroid_z.data();
+
+    // Cache inlet parameters in registers
+    const double vx_inlet  = p.vx_inlet;
+    const double vy_inlet  = p.vy_inlet;
+    const double vz_inlet  = p.vz_inlet;
+    const double tmp_inlet = p.tmp_inlet;
+
+    for (std::size_t face_idx = beg; face_idx < end; ++face_idx) {
+        const auto in = static_cast<std::size_t>(face_owner[face_idx]);
         const auto gh = n_cells + f_loc;
 
-        const double nx = m.face_normal_x[face_idx];
-        const double ny = m.face_normal_y[face_idx];
-        const double nz = m.face_normal_z[face_idx];
+        const double nx = nx_ptr[face_idx];
+        const double ny = ny_ptr[face_idx];
+        const double nz = nz_ptr[face_idx];
 
-        const double fcx = m.face_centroid_x[face_idx];
-        const double fcy = m.face_centroid_y[face_idx];
-        const double fcz = m.face_centroid_z[face_idx];
+        const double fcx = fcx_ptr[face_idx];
+        const double fcy = fcy_ptr[face_idx];
+        const double fcz = fcz_ptr[face_idx];
 
-        const double ccx = m.cell_centroid_x[in];
-        const double ccy = m.cell_centroid_y[in];
-        const double ccz = m.cell_centroid_z[in];
+        const double ccx = ccx_ptr[in];
+        const double ccy = ccy_ptr[in];
+        const double ccz = ccz_ptr[in];
 
         const double rcfx = fcx - ccx;
         const double rcfy = fcy - ccy;
@@ -151,20 +186,20 @@ inline void subsonic_inlet_grad_kernel(fields::ConstPrimitiveView s,
         // ==== 2. Fixed value gradients for velocities ====
         double gx = s_grad.dvx_dx(in), gy = s_grad.dvx_dy(in), gz = s_grad.dvx_dz(in);
         apply_grad_fixed_value_bc(s_grad.dvx_dx(gh), s_grad.dvx_dy(gh), s_grad.dvx_dz(gh),
-                                  gx, gy, gz, s.vx[in], p.vx_inlet, nx, ny, nz, rcfn_inv);
+                                  gx, gy, gz, s.vx[in], vx_inlet, nx, ny, nz, rcfn_inv);
 
         gx = s_grad.dvy_dx(in); gy = s_grad.dvy_dy(in); gz = s_grad.dvy_dz(in);
         apply_grad_fixed_value_bc(s_grad.dvy_dx(gh), s_grad.dvy_dy(gh), s_grad.dvy_dz(gh),
-                                  gx, gy, gz, s.vy[in], p.vy_inlet, nx, ny, nz, rcfn_inv);
+                                  gx, gy, gz, s.vy[in], vy_inlet, nx, ny, nz, rcfn_inv);
 
         gx = s_grad.dvz_dx(in); gy = s_grad.dvz_dy(in); gz = s_grad.dvz_dz(in);
         apply_grad_fixed_value_bc(s_grad.dvz_dx(gh), s_grad.dvz_dy(gh), s_grad.dvz_dz(gh),
-                                  gx, gy, gz, s.vz[in], p.vz_inlet, nx, ny, nz, rcfn_inv);
+                                  gx, gy, gz, s.vz[in], vz_inlet, nx, ny, nz, rcfn_inv);
 
         // ==== 3. Fixed value gradient for temperature ====
         gx = s_grad.dtmp_dx(in); gy = s_grad.dtmp_dy(in); gz = s_grad.dtmp_dz(in);
         apply_grad_fixed_value_bc(s_grad.dtmp_dx(gh), s_grad.dtmp_dy(gh), s_grad.dtmp_dz(gh),
-                                  gx, gy, gz, s.tmp[in], p.tmp_inlet, nx, ny, nz, rcfn_inv);
+                                  gx, gy, gz, s.tmp[in], tmp_inlet, nx, ny, nz, rcfn_inv);
 
         ++f_loc;
     }

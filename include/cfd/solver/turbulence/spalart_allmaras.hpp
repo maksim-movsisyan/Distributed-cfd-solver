@@ -35,7 +35,7 @@
 #include "cfd/io/vtk/vtu.hpp"
 #include "cfd/mesh/localmesh.hpp"
 #include "cfd/solver/bc/bc.hpp"
-#include "cfd/solver/config.hpp"
+#include "cfd/solver/bc/config.hpp"
 #include "cfd/solver/eos/eos_concept.hpp"
 #include "cfd/solver/fields/fields_manager.hpp"
 #include "cfd/solver/fields/fields_view.hpp"
@@ -156,7 +156,7 @@ public:
      */
     template <eos::EquationOfState EOS>
     void initialize(const mesh::MeshPart& mp,
-                    const BoundaryConfig& bcfg,
+                    const bc::BoundaryConfig& bcfg,
                     const EOS& eos,
                     const gradient::VertexAdjacency& adj,
                     halo::HaloExchanger& halo,

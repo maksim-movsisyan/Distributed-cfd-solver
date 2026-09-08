@@ -16,15 +16,22 @@ namespace cfd::solver::bc {
 /** @brief Set value in ghost cell */
 inline void supersonic_outlet_kernel(fields::PrimitiveView<double> s,
                                      const mesh::MeshPart& m,
-                                     LocalIndex fbeg, LocalIndex fend) {
-    std::size_t n_cells = static_cast<std::size_t>(m.n_cells);
-    std::size_t n_inner_faces = static_cast<std::size_t>(m.n_inner_faces);
-    std::size_t f_loc = static_cast<std::size_t>(fbeg) - n_inner_faces;
+                                     const LocalIndex fbeg,
+                                     const LocalIndex fend) noexcept {
+    const auto beg = static_cast<std::size_t>(fbeg);
+    const auto end = static_cast<std::size_t>(fend);
+    if (beg >= end) return;
 
-    for (std::size_t face_idx = static_cast<std::size_t>(fbeg);
-         face_idx < static_cast<std::size_t>(fend); ++face_idx) {
-        const std::size_t in = static_cast<std::size_t>(m.face_owner[face_idx]); // inner (real) cell
-        const std::size_t gh = n_cells + f_loc;                                  // ghost cell = n_cells + local boundary face idx
+    const auto n_cells = static_cast<std::size_t>(m.n_cells);
+    const auto n_inner_faces = static_cast<std::size_t>(m.n_inner_faces);
+    std::size_t f_loc = beg - n_inner_faces;
+
+    // Unpack topology array with restrict
+    const LocalIndex* CFD_RESTRICT face_owner = m.face_owner.data();
+
+    for (std::size_t face_idx = beg; face_idx < end; ++face_idx) {
+        const auto in = static_cast<std::size_t>(face_owner[face_idx]); // inner (real) cell
+        const auto gh = n_cells + f_loc;                                  // ghost cell = n_cells + local boundary face idx
 
         // ==== Extrapolation of all variables (zero-gradient Neumann) ====
         // ==== pressure ====
@@ -45,15 +52,22 @@ inline void supersonic_outlet_kernel(fields::PrimitiveView<double> s,
 /** @brief Set gradient in ghost cell */
 inline void supersonic_outlet_grad_kernel(fields::PrimitiveGradView<double> s_grad,
                                           const mesh::MeshPart& m,
-                                          LocalIndex fbeg, LocalIndex fend) {
-    std::size_t n_cells = static_cast<std::size_t>(m.n_cells);
-    std::size_t n_inner_faces = static_cast<std::size_t>(m.n_inner_faces);
-    std::size_t f_loc = static_cast<std::size_t>(fbeg) - n_inner_faces;
+                                          const LocalIndex fbeg,
+                                          const LocalIndex fend) noexcept {
+    const auto beg = static_cast<std::size_t>(fbeg);
+    const auto end = static_cast<std::size_t>(fend);
+    if (beg >= end) return;
 
-    for (std::size_t face_idx = static_cast<std::size_t>(fbeg);
-         face_idx < static_cast<std::size_t>(fend); ++face_idx) {
-        const std::size_t in = static_cast<std::size_t>(m.face_owner[face_idx]); // inner (real) cell
-        const std::size_t gh = n_cells + f_loc;                                  // ghost cell = n_cells + local boundary face idx
+    const auto n_cells = static_cast<std::size_t>(m.n_cells);
+    const auto n_inner_faces = static_cast<std::size_t>(m.n_inner_faces);
+    std::size_t f_loc = beg - n_inner_faces;
+
+    // Unpack topology array with restrict
+    const LocalIndex* CFD_RESTRICT face_owner = m.face_owner.data();
+
+    for (std::size_t face_idx = beg; face_idx < end; ++face_idx) {
+        const auto in = static_cast<std::size_t>(face_owner[face_idx]); // inner (real) cell
+        const auto gh = n_cells + f_loc;                                  // ghost cell = n_cells + local boundary face idx
 
         // ==== fill gradients in ghost cell ====
         // ==== pressure ====

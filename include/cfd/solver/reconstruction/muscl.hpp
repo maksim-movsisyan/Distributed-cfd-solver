@@ -14,8 +14,9 @@
 
 #include "cfd/core/types.hpp"
 #include "cfd/mesh/localmesh.hpp"
+#include "cfd/mesh/aux_geometry.hpp"
+#include "cfd/mesh/aux_connectivity.hpp"
 #include "cfd/solver/fields/fields_view.hpp"
-#include "cfd/solver/gradient/gradient.hpp"
 #include "cfd/solver/limiter/limiters.hpp"
 #include "cfd/solver/reconstruction/reconstruction.hpp"
 
@@ -24,136 +25,27 @@ namespace cfd::solver::recon {
 template <typename LimiterPolicy>
 struct Muscl {
     static constexpr bool kNeedsGradients = true;
+    static constexpr mesh::AuxGeomType kAuxGeometry = mesh::AuxGeomType::None;
+    static constexpr mesh::AuxConnType kAuxConnectivity = mesh::AuxConnType::CellFaces|
+                                                          mesh::AuxConnType::CellCellsByFace;
     static constexpr const char* name() noexcept { return "MUSCL"; }
     static constexpr const char* limiter_name() noexcept { return LimiterPolicy::name(); }
 
     /**
-     * @struct Geometry
-     * @brief Mesh-fixed precomputed data for MUSCL extrapolation and limiting.
-     */
-    struct Geometry {
-        // Reconstruction vectors per face:
-        // d0 = x_face - x_owner, d1 = x_face - x_neigh
-        std::vector<double> d0x, d0y, d0z; ///< [n_faces]
-        std::vector<double> d1x, d1y, d1z; ///< [n_faces]
-
-        // Cell -> Face incidence stencil of owned cells for the limiter sweep.
-        // Stores pre-directed displacement vector (cell centroid -> face centroid).
-        std::vector<LocalIndex> cell_face_offsets; ///< [n_own + 1]
-        std::vector<LocalIndex> cell_face_ids;     ///< [n_entries]
-        std::vector<double> cell_face_dx;          ///< [n_entries]
-        std::vector<double> cell_face_dy;          ///< [n_entries]
-        std::vector<double> cell_face_dz;          ///< [n_entries]
-
-        // Venkatakrishnan smoothing parameter: eps2 = (k * V^{1/3})^3 = k^3 * V
-        std::vector<double> eps2; ///< [n_own]
-    };
-
-    /**
-     * @brief Precomputes static geometry vectors and cell-face stencils once at startup.
-     */
-    [[nodiscard]] static Geometry build_geometry(const mesh::MeshPart& mp,
-                                                 const double venkat_k = 1.0) {
-        const std::size_t n_inner = static_cast<std::size_t>(mp.n_inner_faces);
-        const std::size_t n_faces = static_cast<std::size_t>(mp.n_faces);
-        const std::size_t n_own   = static_cast<std::size_t>(mp.n_own);
-
-        Geometry g;
-        g.d0x.resize(n_faces);
-        g.d0y.resize(n_faces);
-        g.d0z.resize(n_faces);
-        g.d1x.resize(n_faces);
-        g.d1y.resize(n_faces);
-        g.d1z.resize(n_faces);
-
-        // 1. Precompute face reconstruction vectors
-        for (std::size_t f = 0; f < n_faces; ++f) {
-            const std::size_t c0 = static_cast<std::size_t>(mp.face_owner[f]);
-            g.d0x[f] = mp.face_centroid_x[f] - mp.cell_centroid_x[c0];
-            g.d0y[f] = mp.face_centroid_y[f] - mp.cell_centroid_y[c0];
-            g.d0z[f] = mp.face_centroid_z[f] - mp.cell_centroid_z[c0];
-
-            if (f < n_inner) {
-                const std::size_t c1 = static_cast<std::size_t>(mp.face_neigh[f]);
-                g.d1x[f] = mp.face_centroid_x[f] - mp.cell_centroid_x[c1];
-                g.d1y[f] = mp.face_centroid_y[f] - mp.cell_centroid_y[c1];
-                g.d1z[f] = mp.face_centroid_z[f] - mp.cell_centroid_z[c1];
-            } else {
-                g.d1x[f] = 0.0;
-                g.d1y[f] = 0.0;
-                g.d1z[f] = 0.0;
-            }
-        }
-
-        // 2. Build Cell -> Face CSR stencil (for owned cells only)
-        g.cell_face_offsets.assign(n_own + 1, 0);
-        const auto count_incidence = [&](const LocalIndex c) {
-            if (c >= 0 && c < static_cast<LocalIndex>(n_own)) {
-                ++g.cell_face_offsets[static_cast<std::size_t>(c) + 1];
-            }
-        };
-
-        for (std::size_t f = 0; f < n_faces; ++f) {
-            count_incidence(mp.face_owner[f]);
-            if (f < n_inner) {
-                count_incidence(mp.face_neigh[f]);
-            }
-        }
-
-        for (std::size_t c = 0; c < n_own; ++c) {
-            g.cell_face_offsets[c + 1] += g.cell_face_offsets[c];
-        }
-
-        const std::size_t n_entries = static_cast<std::size_t>(g.cell_face_offsets.back());
-        g.cell_face_ids.resize(n_entries);
-        g.cell_face_dx.resize(n_entries);
-        g.cell_face_dy.resize(n_entries);
-        g.cell_face_dz.resize(n_entries);
-
-        std::vector<LocalIndex> cursor(g.cell_face_offsets.begin(), g.cell_face_offsets.end() - 1);
-        const auto insert_entry = [&](const std::size_t f, const LocalIndex c, const bool is_owner) {
-            if (c < 0 || c >= static_cast<LocalIndex>(n_own)) {
-                return;
-            }
-            const std::size_t cs = static_cast<std::size_t>(c);
-            const std::size_t e  = static_cast<std::size_t>(cursor[cs]++);
-
-            g.cell_face_ids[e] = static_cast<LocalIndex>(f);
-            g.cell_face_dx[e]  = is_owner ? g.d0x[f] : g.d1x[f];
-            g.cell_face_dy[e]  = is_owner ? g.d0y[f] : g.d1y[f];
-            g.cell_face_dz[e]  = is_owner ? g.d0z[f] : g.d1z[f];
-        };
-
-        for (std::size_t f = 0; f < n_faces; ++f) {
-            insert_entry(f, mp.face_owner[f], true);
-            if (f < n_inner) {
-                insert_entry(f, mp.face_neigh[f], false);
-            }
-        }
-
-        // 3. Precompute limiter threshold eps2
-        g.eps2.resize(n_own);
-        const double k3 = venkat_k * venkat_k * venkat_k;
-        for (std::size_t c = 0; c < n_own; ++c) {
-            g.eps2[c] = k3 * mp.cell_volume[c];
-        }
-
-        return g;
-    }
-
-    /**
      * @brief Per-stage limiter evaluation over owned cells.
      */
-    static void compute_limiters(const mesh::MeshPart& mp,
+    static inline void compute_limiters(const mesh::MeshPart& mesh,
+                                 const mesh::MeshAuxConnectivity& aux_conn,
                                  fields::ConstPrimitiveView q,
                                  fields::ConstPrimitiveGradView grad,
-                                 const gradient::VertexAdjacency& adj,
-                                 const Geometry& g,
-                                 fields::PrimitiveView<double> phi) noexcept {
-        const std::size_t n_own = static_cast<std::size_t>(mp.n_own);
+                                 fields::PrimitiveView<double> phi,
+                                 const double venkat_k = 1.0) noexcept {
+        const std::size_t n_own = static_cast<std::size_t>(mesh.n_own);
 
-        const LocalIndex* CFD_RESTRICT nbo = adj.offsets.data();
-        const LocalIndex* CFD_RESTRICT nbc = adj.cells.data();
+        const LocalIndex* CFD_RESTRICT c2c_off = aux_conn.cell_cells_face_offsets.data();
+        const LocalIndex* CFD_RESTRICT c2c_val = aux_conn.cell_cells_face.data();
+        const LocalIndex* CFD_RESTRICT c2f_off = aux_conn.cell_faces_offsets.data();
+        const LocalIndex* CFD_RESTRICT c2f_val = aux_conn.cell_faces.data();
 
         const double* CFD_RESTRICT prs = q.prs;
         const double* CFD_RESTRICT vx  = q.vx;
@@ -161,14 +53,23 @@ struct Muscl {
         const double* CFD_RESTRICT vz  = q.vz;
         const double* CFD_RESTRICT tmp = q.tmp;
 
+        const double* CFD_RESTRICT face_centroid_x = mesh.face_centroid_x.data();
+        const double* CFD_RESTRICT face_centroid_y = mesh.face_centroid_y.data();
+        const double* CFD_RESTRICT face_centroid_z = mesh.face_centroid_z.data();
+        const double* CFD_RESTRICT cell_centroid_x = mesh.cell_centroid_x.data();
+        const double* CFD_RESTRICT cell_centroid_y = mesh.cell_centroid_y.data();
+        const double* CFD_RESTRICT cell_centroid_z = mesh.cell_centroid_z.data();
+
+        // loop over all owned cells
         for (std::size_t c = 0; c < n_own; ++c) {
             // 1. Determine neighbor extrema (including self)
             double qmax[constants::kNumVars] = {prs[c], vx[c], vy[c], vz[c], tmp[c]};
             double qmin[constants::kNumVars] = {prs[c], vx[c], vy[c], vz[c], tmp[c]};
             const double qc[constants::kNumVars] = {prs[c], vx[c], vy[c], vz[c], tmp[c]};
             
-            for (LocalIndex j = nbo[c]; j < nbo[c + 1]; ++j) {
-                const auto js = static_cast<std::size_t>(nbc[j]);
+            // loop over all cell neighbors
+            for (LocalIndex j = c2c_off[c]; j < c2c_off[c + 1]; ++j) {
+                const std::size_t js = static_cast<std::size_t>(c2c_val[j]);
                 qmax[0] = std::max(qmax[0], prs[js]);
                 qmin[0] = std::min(qmin[0], prs[js]);
 
@@ -183,11 +84,12 @@ struct Muscl {
 
                 qmax[4] = std::max(qmax[4], tmp[js]);
                 qmin[4] = std::min(qmin[4], tmp[js]);
-            }
+            } // end loop over all cell neighbors
 
             // 2. Scan cell faces and accumulate running minimum of limiter
             double ph[constants::kNumVars] = {1.0, 1.0, 1.0, 1.0, 1.0};
-            const double eps2 = g.eps2[c];
+            const double k3 = venkat_k * venkat_k * venkat_k;
+            const double eps2 = k3 * mesh.cell_volume[c];
 
             const double g_p[3]  = {grad.dprs_dx(c), grad.dprs_dy(c), grad.dprs_dz(c)};
             const double g_vx[3] = {grad.dvx_dx(c),  grad.dvx_dy(c),  grad.dvx_dz(c)};
@@ -195,11 +97,14 @@ struct Muscl {
             const double g_vz[3] = {grad.dvz_dx(c),  grad.dvz_dy(c),  grad.dvz_dz(c)};
             const double g_t[3]  = {grad.dtmp_dx(c), grad.dtmp_dy(c), grad.dtmp_dz(c)};
 
-            for (LocalIndex e = g.cell_face_offsets[c]; e < g.cell_face_offsets[c + 1]; ++e) {
+            // loop over all cell faces
+            for (LocalIndex e = c2f_off[c]; e < c2f_off[c + 1]; ++e) {
                 const std::size_t es = static_cast<std::size_t>(e);
-                const double ex = g.cell_face_dx[es];
-                const double ey = g.cell_face_dy[es];
-                const double ez = g.cell_face_dz[es];
+                const std::size_t f = static_cast<std::size_t>(c2f_val[es]);
+
+                const double ex = face_centroid_x[f] - cell_centroid_x[c];
+                const double ey = face_centroid_y[f] - cell_centroid_y[c];
+                const double ez = face_centroid_z[f] - cell_centroid_z[c];
 
                 const double df[constants::kNumVars] = {
                     g_p[0]  * ex + g_p[1]  * ey + g_p[2]  * ez,
@@ -213,7 +118,7 @@ struct Muscl {
                     const double d_nb = (df[v] > 0.0) ? (qmax[v] - qc[v]) : (qmin[v] - qc[v]);
                     ph[v] = std::min(ph[v], LimiterPolicy::phi(d_nb, df[v], eps2));
                 }
-            }
+            } // end loop over all cell faces
 
             phi.prs[c] = ph[0];
             phi.vx[c]  = ph[1];
@@ -226,20 +131,21 @@ struct Muscl {
     /**
      * @brief Interior face primitive reconstruction via limited gradients.
      */
-    static void face_states(const ReconField& s,
-                            const Geometry& g,
+    static inline void face_states(const ReconField& s,
+                            const mesh::MeshPart& mesh,
+                            const mesh::MeshAuxGeometry& /*aux_geom*/,
                             const std::size_t f,
                             const std::size_t c0,
                             const std::size_t c1,
                             double qL[constants::kNumVars],
                             double qR[constants::kNumVars]) noexcept {
-        const double d0x = g.d0x[f];
-        const double d0y = g.d0y[f];
-        const double d0z = g.d0z[f];
+        const double d0x = mesh.face_centroid_x[f] - mesh.cell_centroid_x[c0];
+        const double d0y = mesh.face_centroid_y[f] - mesh.cell_centroid_y[c0];
+        const double d0z = mesh.face_centroid_z[f] - mesh.cell_centroid_z[c0];
 
-        const double d1x = g.d1x[f];
-        const double d1y = g.d1y[f];
-        const double d1z = g.d1z[f];
+        const double d1x = mesh.face_centroid_x[f] - mesh.cell_centroid_x[c1];
+        const double d1y = mesh.face_centroid_y[f] - mesh.cell_centroid_y[c1];
+        const double d1z = mesh.face_centroid_z[f] - mesh.cell_centroid_z[c1];
 
         // Owner cell state (L)
         qL[0] = s.q.prs[c0] + s.phi.prs[c0] * (s.grad.dprs_dx(c0) * d0x + s.grad.dprs_dy(c0) * d0y + s.grad.dprs_dz(c0) * d0z);
@@ -260,8 +166,9 @@ struct Muscl {
      * @brief Boundary face reconstruction.
      * The ghost state cg carries the exact BC state, owner c0 uses its cell centroid state.
      */
-    static void boundary_face_states(const ReconField& s,
-                                     const Geometry& /*g*/,
+    static inline void boundary_face_states(const ReconField& s,
+                                     const mesh::MeshPart& /*mesh*/,
+                                     const mesh::MeshAuxGeometry& /*aux_geom*/,
                                      const std::size_t /*f*/,
                                      const std::size_t c0,
                                      const std::size_t cg,

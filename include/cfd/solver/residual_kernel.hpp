@@ -13,6 +13,9 @@
 
 #include "cfd/core/types.hpp"
 #include "cfd/mesh/localmesh.hpp"
+#include "cfd/mesh/aux_connectivity.hpp"
+#include "cfd/mesh/aux_geometry.hpp"
+#include "cfd/solver/fluxes/viscous.hpp"
 #include "cfd/solver/eos/eos_concept.hpp"
 #include "cfd/solver/eos/state_conversions.hpp"
 #include "cfd/solver/fields/fields_view.hpp"
@@ -35,15 +38,17 @@ namespace cfd::solver {
  * @tparam EOS   Thermodynamic Equation of State conforming to eos::EquationOfState
  * @tparam Flux  Numerical flux policy (e.g., riemann::HllcFlux)
  * @tparam Recon Spatial reconstruction policy (recon::FirstOrder, recon::Muscl<Limiter>)
- * @tparam Phys  Flow equation set (mean-flow base; stack-level service flags,
- *               e.g. face mass-flux storage, arrive via PhysicsStack::KernelPhysics)
+ * @tparam Phys  Flow equation set
  */
 template <eos::EquationOfState EOS, typename Flux,
           recon::ReconstructionPolicy Recon, physics::PhysicsGeneral Phys>
 class ResidualKernel {
 public:
-    ResidualKernel(const mesh::MeshPart& mp, const EOS eos, const Phys phys)
-        : mp_(mp), eos_(eos), phys_(phys), phys_geom_(Phys::build_geometry(mp)) {}
+    ResidualKernel(const mesh::MeshPart& mesh, 
+                   const mesh::MeshAuxConnectivity& aux_conn,
+                   const mesh::MeshAuxGeometry& aux_geom,
+                   const EOS eos, const Phys& phys)
+        : mesh_(mesh), aux_conn_(aux_conn), aux_geom_(aux_geom), eos_(eos), phys_(phys) {}
 
     /**
      * @brief Evaluates the spatial residual and spectral radius across the local partition.
@@ -51,7 +56,6 @@ public:
      * @param[in]  q     Primitive cell states [p, u, v, w, T], halo- and BC-ghost-complete.
      * @param[in]  grad  Cell gradients (valid if kNeedsGradients == true).
      * @param[in]  phi   Cell gradient limiters in [0, 1].
-     * @param[in]  geom  Reconstruction precomputed geometry (from Recon::build_geometry).
      * @param[out] res   Accumulated flux balance vector.
      * @param[out] lam   Accumulated per-cell spectral radius (size >= n_cells).
      * @param[in]  mut   Eddy viscosity per cell (nullptr without turbulence).
@@ -60,14 +64,13 @@ public:
     void apply(fields::ConstPrimitiveView q,
                fields::ConstPrimitiveGradView grad,
                fields::ConstPrimitiveView phi,
-               const typename Recon::Geometry& geom,
                fields::ResidualView<double> res,
                double* CFD_RESTRICT lam,
                const double* CFD_RESTRICT mut = nullptr,
                double* CFD_RESTRICT mdot = nullptr) const noexcept {
-        const std::size_t n_inner  = static_cast<std::size_t>(mp_.n_inner_faces);
-        const std::size_t n_faces  = static_cast<std::size_t>(mp_.n_faces);
-        const std::size_t n_cells  = static_cast<std::size_t>(mp_.n_cells);
+        const std::size_t n_inner  = static_cast<std::size_t>(mesh_.n_inner_faces);
+        const std::size_t n_faces  = static_cast<std::size_t>(mesh_.n_faces);
+        const std::size_t n_cells  = static_cast<std::size_t>(mesh_.n_cells);
         const std::size_t n_bfaces = n_faces - n_inner;
         const std::size_t n_total  = n_cells + n_bfaces;
 
@@ -80,7 +83,7 @@ public:
         std::fill(lam, lam + n_cells, 0.0);
 
         // 2. Fused flux evaluation (Euler Riemann solver + Navier-Stokes diffusion)
-        compute_fluxes(q, grad, phi, geom, res, lam, mut, mdot);
+        compute_fluxes(q, grad, phi, res, lam, mut, mdot);
     }
 
     /**
@@ -89,24 +92,26 @@ public:
     void boundary_integrals(fields::ConstPrimitiveView q,
                             fields::ConstPrimitiveGradView grad,
                             fields::ConstPrimitiveView phi,
-                            const typename Recon::Geometry& geom,
                             std::vector<double>& mass,
                             std::vector<double>& energy,
                             const double* CFD_RESTRICT mut = nullptr) const noexcept {
-        const std::size_t n_inner = static_cast<std::size_t>(mp_.n_inner_faces);
-        const std::size_t n_faces = static_cast<std::size_t>(mp_.n_faces);
-        const std::size_t n_cells = static_cast<std::size_t>(mp_.n_cells);
-        const std::size_t np      = mp_.patches.size();
+        const std::size_t n_inner  = static_cast<std::size_t>(mesh_.n_inner_faces);
+        const std::size_t n_faces  = static_cast<std::size_t>(mesh_.n_faces);
+        const std::size_t n_cells  = static_cast<std::size_t>(mesh_.n_cells);
+        const std::size_t n_bfaces = n_faces - n_inner;
+        const std::size_t n_total  = n_cells + n_bfaces;
+
+        const std::size_t np      = mesh_.patches.size();
 
         mass.assign(np, 0.0);
         energy.assign(np, 0.0);
 
-        const LocalIndex* CFD_RESTRICT owner = mp_.face_owner.data();
-        const mesh::PatchId* CFD_RESTRICT patch = mp_.face_patch.data();
-        const double* CFD_RESTRICT nx = mp_.face_normal_x.data();
-        const double* CFD_RESTRICT ny = mp_.face_normal_y.data();
-        const double* CFD_RESTRICT nz = mp_.face_normal_z.data();
-        const double* CFD_RESTRICT area = mp_.face_area.data();
+        const LocalIndex* CFD_RESTRICT owner = mesh_.face_owner.data();
+        const mesh::PatchId* CFD_RESTRICT patch = mesh_.face_patch.data();
+        const double* CFD_RESTRICT nx = mesh_.face_normal_x.data();
+        const double* CFD_RESTRICT ny = mesh_.face_normal_y.data();
+        const double* CFD_RESTRICT nz = mesh_.face_normal_z.data();
+        const double* CFD_RESTRICT area = mesh_.face_area.data();
 
         const recon::ReconField rf{q, grad, phi};
 
@@ -117,7 +122,7 @@ public:
 
             double qL[Phys::kNumVars];
             double qR[Phys::kNumVars];
-            Recon::boundary_face_states(rf, geom, f, c0, cg, qL, qR);
+            Recon::boundary_face_states(rf, mesh_, aux_geom_, f, c0, cg, qL, qR);
 
             double UL[Phys::kNumVars];
             double UR[Phys::kNumVars];
@@ -131,8 +136,18 @@ public:
             double energy_flux = F[4];
 
             if constexpr (Phys::kHasViscous) {
-                const auto visc = compute_face_viscous_flux(f, c0, cg, q, grad, mut, nxf, nyf, nzf, Af);
-                energy_flux += visc.Fv4;
+                double F_visc[Phys::kNumVars];
+                double lam_visc = 0.0;
+                const double mutL = mut ? mut[c0] : 0.0;
+                const double mutR = mut ? mut[cg] : 0.0;
+
+                const double qL_visc[5] = { q.prs[c0], q.vx[c0], q.vy[c0], q.vz[c0], q.tmp[c0] };
+                const double qR_visc[5] = { q.prs[cg], q.vx[cg], q.vy[cg], q.vz[cg], q.tmp[cg] };
+                fluxes::ViscousFlux::face_flux(eos_, aux_geom_, f, c0, cg, n_total, qL_visc, qR_visc, 
+                                               grad.vx_grad, grad.vy_grad, grad.vz_grad, grad.tmp_grad,
+                                               mutL, mutR, nxf, nyf, nzf, Af, F_visc, lam_visc,
+                                               phys_.prandtl(), phys_.prandtl_turb());
+                energy_flux += F_visc[4];
             }
 
             const std::size_t p = static_cast<std::size_t>(patch[f]);
@@ -141,184 +156,30 @@ public:
         }
     }
 
-    [[nodiscard]] const EOS& eos() const noexcept { return eos_; }
-
-    /** @brief Physics (mean-flow) geometry — consumed by module face sweeps. */
-    [[nodiscard]] const typename Phys::Geometry& phys_geometry() const noexcept {
-        return phys_geom_;
-    }
-
-    /**
-     * @brief Assembles dR/dU of the FIRST-ORDER mean-flow operator into `sink`
-     *        as signed 5x5 blocks per cell pair.
-     *
-     * Standard implicit-scheme approximation: the matrix linearizes the
-     * first-order flux (piecewise-constant cell states) even when the residual
-     * itself runs MUSCL — reconstruction/limiter derivatives are dropped, the
-     * stencil stays one-hop. Interior faces only, blocks:
-     *   J(c0,c0) += dFL, J(c0,c1) += dFR,
-     *   J(c1,c0) -= dFL, J(c1,c1) -= dFR
-     * Contributions with a non-owned row cell (an MPI ghost across the
-     * partition boundary) are the neighbouring rank's business; the sink
-     * filters them. Boundary faces are linearized separately through the
-     * actual BC ghost machinery (Solver::assemble_boundary_jacobian).
-     *
-     * @param q    Primitive states, halo- and BC-complete (from a preceding
-     *             evaluate_residual of the same state).
-     * @param sink Receiver with add_block(row_cell, col_cell, scale, block5x5).
-     */
-    template <typename JacobianSink>
-    void assemble_jacobian(fields::ConstPrimitiveView q, JacobianSink& sink) const noexcept {
-        constexpr int N = Phys::kNumVars;
-        static_assert(Phys::kNumVars == constants::kNumVars,
-                      "assemble_jacobian expects the 5-var mean-flow base");
-
-        const std::size_t n_inner = static_cast<std::size_t>(mp_.n_inner_faces);
-
-        const LocalIndex* CFD_RESTRICT owner = mp_.face_owner.data();
-        const LocalIndex* CFD_RESTRICT neigh = mp_.face_neigh.data();
-        const double* CFD_RESTRICT nx = mp_.face_normal_x.data();
-        const double* CFD_RESTRICT ny = mp_.face_normal_y.data();
-        const double* CFD_RESTRICT nz = mp_.face_normal_z.data();
-        const double* CFD_RESTRICT area = mp_.face_area.data();
-
-        double dFL[N * N];
-        double dFR[N * N];
-
-        for (std::size_t f = 0; f < n_inner; ++f) {
-            const LocalIndex c0 = owner[f];
-            const LocalIndex c1 = neigh[f];
-            const double nxf = nx[f], nyf = ny[f], nzf = nz[f], Af = area[f];
-
-            double UL[N], UR[N];
-            eos::primitives_pT_to_conserved(eos_, q.prs[c0], q.vx[c0], q.vy[c0], q.vz[c0],
-                                            q.tmp[c0], UL);
-            eos::primitives_pT_to_conserved(eos_, q.prs[c1], q.vx[c1], q.vy[c1], q.vz[c1],
-                                            q.tmp[c1], UR);
-
-            Flux::face_flux_jacobian(eos_, UL, UR, nxf, nyf, nzf, Af, dFL, dFR);
-
-            // Residual convention: res[c0] += F, res[c1] -= F.
-            sink.add_block(c0, c0, 1.0, dFL);
-            sink.add_block(c0, c1, 1.0, dFR);
-            sink.add_block(c1, c0, -1.0, dFL);
-            sink.add_block(c1, c1, -1.0, dFR);
-        }
-    }
-
-private:
-    struct ViscousFaceResult {
-        double Fv1{0.0};
-        double Fv2{0.0};
-        double Fv3{0.0};
-        double Fv4{0.0};
-        double lam_visc{0.0};
-    };
-
-    /**
-     * @brief Computes viscous diffusion flux and spectral radius contribution for a single face.
-     */
-    [[nodiscard]] inline ViscousFaceResult compute_face_viscous_flux(
-        std::size_t f, std::size_t c0, std::size_t c1,
-        fields::ConstPrimitiveView q,
-        fields::ConstPrimitiveGradView grad,
-        const double* CFD_RESTRICT mut,
-        double nxf, double nyf, double nzf, double Af) const noexcept {
-        const double* CFD_RESTRICT g_dx = phys_geom_.dx.data();
-        const double* CFD_RESTRICT g_dy = phys_geom_.dy.data();
-        const double* CFD_RESTRICT g_dz = phys_geom_.dz.data();
-        const double* CFD_RESTRICT g_inv_d = phys_geom_.inv_d.data();
-
-        const double pL = q.prs[c0], uL = q.vx[c0], vL = q.vy[c0], wL = q.vz[c0], TL = q.tmp[c0];
-        const double pR = q.prs[c1], uR = q.vx[c1], vR = q.vy[c1], wR = q.vz[c1], TR = q.tmp[c1];
-
-        const double u_f = 0.5 * (uL + uR);
-        const double v_f = 0.5 * (vL + vR);
-        const double w_f = 0.5 * (wL + wR);
-        const double T_f = 0.5 * (TL + TR);
-        const double p_f = 0.5 * (pL + pR);
-
-        const double mu_lam = phys_.viscosity(T_f);
-        const double mu_t_f = mut ? 0.5 * (mut[c0] + mut[c1]) : 0.0;
-        const double mu_eff = mu_lam + mu_t_f;
-
-        const double k_lam = phys_.thermal_conductivity(eos_, T_f, p_f);
-        const double cp    = eos_.cp_Tp(T_f, p_f);
-        constexpr double kInvPrt = 1.0 / constants::kTurbPrandtl;
-        const double k_eff = k_lam + mu_t_f * cp * kInvPrt;
-
-        const double inv_d = g_inv_d[f];
-        const double xi_x  = g_dx[f] * inv_d;
-        const double xi_y  = g_dy[f] * inv_d;
-        const double xi_z  = g_dz[f] * inv_d;
-
-        const double n_corr_x = nxf - xi_x;
-        const double n_corr_y = nyf - xi_y;
-        const double n_corr_z = nzf - xi_z;
-
-        const double du_dx = 0.5 * (grad.dvx_dx(c0) + grad.dvx_dx(c1));
-        const double du_dy = 0.5 * (grad.dvx_dy(c0) + grad.dvx_dy(c1));
-        const double du_dz = 0.5 * (grad.dvx_dz(c0) + grad.dvx_dz(c1));
-
-        const double dv_dx = 0.5 * (grad.dvy_dx(c0) + grad.dvy_dx(c1));
-        const double dv_dy = 0.5 * (grad.dvy_dy(c0) + grad.dvy_dy(c1));
-        const double dv_dz = 0.5 * (grad.dvy_dz(c0) + grad.dvy_dz(c1));
-
-        const double dw_dx = 0.5 * (grad.dvz_dx(c0) + grad.dvz_dx(c1));
-        const double dw_dy = 0.5 * (grad.dvz_dy(c0) + grad.dvz_dy(c1));
-        const double dw_dz = 0.5 * (grad.dvz_dz(c0) + grad.dvz_dz(c1));
-
-        const double dT_dx = 0.5 * (grad.dtmp_dx(c0) + grad.dtmp_dx(c1));
-        const double dT_dy = 0.5 * (grad.dtmp_dy(c0) + grad.dtmp_dy(c1));
-        const double dT_dz = 0.5 * (grad.dtmp_dz(c0) + grad.dtmp_dz(c1));
-
-        const double div_v = du_dx + dv_dy + dw_dz;
-        const double two_thirds_div_v = (2.0 / 3.0) * div_v;
-
-        const double du_dn = (uR - uL) * inv_d + (du_dx * n_corr_x + du_dy * n_corr_y + du_dz * n_corr_z);
-        const double dv_dn = (vR - vL) * inv_d + (dv_dx * n_corr_x + dv_dy * n_corr_y + dv_dz * n_corr_z);
-        const double dw_dn = (wR - wL) * inv_d + (dw_dx * n_corr_x + dw_dy * n_corr_y + dw_dz * n_corr_z);
-        const double dT_dn = (TR - TL) * inv_d + (dT_dx * n_corr_x + dT_dy * n_corr_y + dT_dz * n_corr_z);
-
-        const double tau_nx = mu_eff * (du_dn + (du_dx * nxf + dv_dx * nyf + dw_dx * nzf) - two_thirds_div_v * nxf);
-        const double tau_ny = mu_eff * (dv_dn + (du_dy * nxf + dv_dy * nyf + dw_dy * nzf) - two_thirds_div_v * nyf);
-        const double tau_nz = mu_eff * (dw_dn + (du_dz * nxf + dv_dz * nyf + dw_dz * nzf) - two_thirds_div_v * nzf);
-
-        const double qn = -k_eff * dT_dn;
-
-        const double rho_f = eos_.density_Tp(T_f, p_f);
-        const double nu_eff = mu_eff / rho_f;
-
-        return ViscousFaceResult{
-            .Fv1 = -tau_nx * Af,
-            .Fv2 = -tau_ny * Af,
-            .Fv3 = -tau_nz * Af,
-            .Fv4 = (-(u_f * tau_nx + v_f * tau_ny + w_f * tau_nz) + qn) * Af,
-            .lam_visc = (4.0 / 3.0) * nu_eff * inv_d * Af
-        };
-    }
-    
+private:    
     /**
      * @brief Evaluates combined (inviscid + viscous) fluxes over all interior and boundary faces in a single pass.
      */
     void compute_fluxes(fields::ConstPrimitiveView q,
                         fields::ConstPrimitiveGradView grad,
                         fields::ConstPrimitiveView phi,
-                        const typename Recon::Geometry& geom,
                         fields::ResidualView<double> res,
                         double* CFD_RESTRICT lam,
                         const double* CFD_RESTRICT mut = nullptr,
                         double* CFD_RESTRICT mdot = nullptr) const noexcept {
-        const std::size_t n_inner = static_cast<std::size_t>(mp_.n_inner_faces);
-        const std::size_t n_faces = static_cast<std::size_t>(mp_.n_faces);
-        const std::size_t n_cells = static_cast<std::size_t>(mp_.n_cells);
+        const std::size_t n_inner  = static_cast<std::size_t>(mesh_.n_inner_faces);
+        const std::size_t n_faces  = static_cast<std::size_t>(mesh_.n_faces);
+        const std::size_t n_cells  = static_cast<std::size_t>(mesh_.n_cells);
+        const std::size_t n_bfaces = n_faces - n_inner;
+        const std::size_t n_total  = n_cells + n_bfaces;
 
-        const LocalIndex* CFD_RESTRICT owner = mp_.face_owner.data();
-        const LocalIndex* CFD_RESTRICT neigh = mp_.face_neigh.data();
-        const double* CFD_RESTRICT nx = mp_.face_normal_x.data();
-        const double* CFD_RESTRICT ny = mp_.face_normal_y.data();
-        const double* CFD_RESTRICT nz = mp_.face_normal_z.data();
-        const double* CFD_RESTRICT area = mp_.face_area.data();
+        const LocalIndex* CFD_RESTRICT owner = mesh_.face_owner.data();
+        const LocalIndex* CFD_RESTRICT neigh = mesh_.face_neigh.data();
+
+        const double* CFD_RESTRICT nx = mesh_.face_normal_x.data();
+        const double* CFD_RESTRICT ny = mesh_.face_normal_y.data();
+        const double* CFD_RESTRICT nz = mesh_.face_normal_z.data();
+        const double* CFD_RESTRICT area = mesh_.face_area.data();
 
         const recon::ReconField rf{q, grad, phi};
 
@@ -330,7 +191,7 @@ private:
 
             double qL[Phys::kNumVars];
             double qR[Phys::kNumVars];
-            Recon::face_states(rf, geom, f, c0, c1, qL, qR);
+            Recon::face_states(rf, mesh_, aux_geom_, f, c0, c1, qL, qR);
 
             double UL[Phys::kNumVars];
             double UR[Phys::kNumVars];
@@ -348,12 +209,23 @@ private:
             double lam_f = Af * smax;
 
             if constexpr (Phys::kHasViscous) {
-                const auto visc = compute_face_viscous_flux(f, c0, c1, q, grad, mut, nxf, nyf, nzf, Af);
-                F[1] += visc.Fv1;
-                F[2] += visc.Fv2;
-                F[3] += visc.Fv3;
-                F[4] += visc.Fv4;
-                lam_f += visc.lam_visc;
+                double F_visc[Phys::kNumVars];
+                double lam_visc = 0.0;
+                const double mutL = mut ? mut[c0] : 0.0;
+                const double mutR = mut ? mut[c1] : 0.0;
+
+                const double qL_visc[5] = { q.prs[c0], q.vx[c0], q.vy[c0], q.vz[c0], q.tmp[c0] };
+                const double qR_visc[5] = { q.prs[c1], q.vx[c1], q.vy[c1], q.vz[c1], q.tmp[c1] };
+                fluxes::ViscousFlux::face_flux(eos_, aux_geom_, f, c0, c1, n_total, qL_visc, qR_visc, 
+                                               grad.vx_grad, grad.vy_grad, grad.vz_grad, grad.tmp_grad,
+                                               mutL, mutR, nxf, nyf, nzf, Af, F_visc, lam_visc,
+                                               phys_.prandtl(), phys_.prandtl_turb());
+
+                F[1] += F_visc[1];
+                F[2] += F_visc[2];
+                F[3] += F_visc[3];
+                F[4] += F_visc[4];
+                lam_f += lam_visc;
             }
 
             // Flux leaves owner, enters neighbor
@@ -381,7 +253,7 @@ private:
 
             double qL[Phys::kNumVars];
             double qR[Phys::kNumVars];
-            Recon::boundary_face_states(rf, geom, f, c0, cg, qL, qR);
+            Recon::boundary_face_states(rf, mesh_, aux_geom_, f, c0, cg, qL, qR);
 
             double UL[Phys::kNumVars];
             double UR[Phys::kNumVars];
@@ -399,12 +271,23 @@ private:
             double lam_f = Af * smax;
 
             if constexpr (Phys::kHasViscous) {
-                const auto visc = compute_face_viscous_flux(f, c0, cg, q, grad, mut, nxf, nyf, nzf, Af);
-                F[1] += visc.Fv1;
-                F[2] += visc.Fv2;
-                F[3] += visc.Fv3;
-                F[4] += visc.Fv4;
-                lam_f += visc.lam_visc;
+                double F_visc[Phys::kNumVars];
+                double lam_visc = 0.0;
+                const double mutL = mut ? mut[c0] : 0.0;
+                const double mutR = mut ? mut[cg] : 0.0;
+
+                const double qL_visc[5] = { q.prs[c0], q.vx[c0], q.vy[c0], q.vz[c0], q.tmp[c0] };
+                const double qR_visc[5] = { q.prs[cg], q.vx[cg], q.vy[cg], q.vz[cg], q.tmp[cg] };
+                fluxes::ViscousFlux::face_flux(eos_, aux_geom_, f, c0, cg, n_total, qL_visc, qR_visc, 
+                                               grad.vx_grad, grad.vy_grad, grad.vz_grad, grad.tmp_grad,
+                                               mutL, mutR, nxf, nyf, nzf, Af, F_visc, lam_visc,
+                                               phys_.prandtl(), phys_.prandtl_turb());
+
+                F[1] += F_visc[1];
+                F[2] += F_visc[2];
+                F[3] += F_visc[3];
+                F[4] += F_visc[4];
+                lam_f += lam_visc;
             }
 
             // Boundary face updates owner cell only
@@ -418,10 +301,11 @@ private:
         }
     }
 
-    const mesh::MeshPart& mp_;
+    const mesh::MeshPart& mesh_;
+    const mesh::MeshAuxConnectivity& aux_conn_;
+    const mesh::MeshAuxGeometry& aux_geom_;
     EOS eos_;
     Phys phys_;
-    typename Phys::Geometry phys_geom_;
 };
 
 } // namespace cfd::solver

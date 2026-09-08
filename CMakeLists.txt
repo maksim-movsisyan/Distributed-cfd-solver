@@ -191,6 +191,8 @@ add_library(
         src/mesh/reorder.cpp
         src/mesh/bc_config.cpp
         src/mesh/validate.cpp
+        src/mesh/aux_connectivity.cpp
+        src/mesh/aux_geometry.cpp
 )
 
 target_include_directories(
@@ -263,26 +265,33 @@ target_link_libraries(
         cfd_project_warnings
 )
 
-    #==============================================
-    #=== SOLVER MESH (PARTITIONED) INPUT/OUTPUT ===
-    #==============================================
+    #=====================================
+    #=== SOLVER INPUT/OUTPUT UTILITIES ===
+    #===================================== 
 add_library(
-    cfd_solver_mesh_io
+    cfd_solver_io
     STATIC
         src/io/solver_mesh/hdf5_writer.cpp
         src/io/solver_mesh/hdf5_reader.cpp
         src/io/vtk/vtu.cpp
+        src/io/toml/toml_utilities.cpp
 )
 
 target_include_directories(
-    cfd_solver_mesh_io
+    cfd_solver_io
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
 )
 
+target_include_directories(
+    cfd_solver_io
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/external/tomlplusplus/include
+)
+
 target_link_libraries(
-    cfd_solver_mesh_io
+    cfd_solver_io
     PUBLIC
         MPI::MPI_CXX
         HDF5::HDF5
@@ -299,12 +308,12 @@ target_link_libraries(
 add_library(
     cfd_solver
     STATIC
+        src/solver/bc/config.cpp
         src/solver/config.cpp
         src/solver/halo.cpp
         src/solver/solver.cpp
-        src/solver/gradient/adjacency.cpp
-        src/solver/gradient/lsq_gradient.cpp
-        src/solver/turbulence/wall_distance.cpp
+        src/solver/gradient/gradient_operator.cpp
+        src/solver/gradient/gradient_manager.cpp
 )
 
 target_include_directories(
@@ -326,7 +335,7 @@ target_link_libraries(
         cfd_project_options
         cfd_mpi
         cfd_mesh
-        cfd_solver_mesh_io
+        cfd_solver_io
         cfd_linalg
     PRIVATE
         cfd_project_warnings
@@ -350,7 +359,7 @@ target_link_libraries(
         cfd_mpi      
         cfd_mesh      
         cfd_partition  
-        cfd_solver_mesh_io          
+        cfd_solver_io          
 )
 
 
@@ -367,7 +376,7 @@ target_link_libraries(
 
     cfd_mpi
     cfd_mesh
-    cfd_solver_mesh_io
+    cfd_solver_io
     cfd_solver
 )
 

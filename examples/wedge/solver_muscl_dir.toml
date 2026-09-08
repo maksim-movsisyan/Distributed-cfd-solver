@@ -22,8 +22,8 @@ venkat_k = 0.5
 
 [time]
 scheme = "FORWARD_EULER"
-cfl = 1.0
-max_iterations = 4000
+cfl = 0.5
+max_iterations = 10000
 residual_tolerance = 1.0e-10
 
 [output]

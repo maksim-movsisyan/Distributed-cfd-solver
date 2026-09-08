@@ -14,6 +14,7 @@
 #include "cfd/mesh/validate.hpp"
 #include "cfd/mpi/log.hpp"
 #include "cfd/solver/config.hpp"
+#include "cfd/solver/bc/config.hpp"
 #include "cfd/solver/solver.hpp"
 
 int main(int argc, char** argv) {
@@ -91,8 +92,8 @@ int main(int argc, char** argv) {
     // Read solver config and boundary conditions file
     const cfd::solver::SolverConfig cfg =
         cfd::solver::parse_solver_config(solver_cfg_file, MPI_COMM_WORLD);
-    const cfd::solver::BoundaryConfig bcfg =
-        cfd::solver::parse_boundary_config(bc_cfg_file, mp, MPI_COMM_WORLD);
+    const cfd::solver::bc::BoundaryConfig bcfg =
+        cfd::solver::bc::parse_boundary_config(bc_cfg_file, mp, MPI_COMM_WORLD);
 
     const int status = cfd::solver::run_solver(cfg, bcfg, mp, MPI_COMM_WORLD);
         

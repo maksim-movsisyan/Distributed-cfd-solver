@@ -19,19 +19,28 @@ inline void symmetry_kernel(fields::PrimitiveView<double> s,
                             const mesh::MeshPart& m,
                             const LocalIndex fbeg,
                             const LocalIndex fend) noexcept {
+    const auto beg = static_cast<std::size_t>(fbeg);
+    const auto end = static_cast<std::size_t>(fend);
+    if (beg >= end) return;
+
     const auto n_cells = static_cast<std::size_t>(m.n_cells);
     const auto n_inner_faces = static_cast<std::size_t>(m.n_inner_faces);
-    std::size_t f_loc = static_cast<std::size_t>(fbeg) - n_inner_faces;
+    std::size_t f_loc = beg - n_inner_faces;
 
-    for (std::size_t face_idx = static_cast<std::size_t>(fbeg);
-         face_idx < static_cast<std::size_t>(fend); ++face_idx) {
-        const auto in = static_cast<std::size_t>(m.face_owner[face_idx]); // inner (real) cell
+    // Unpack topology and normal arrays with restrict
+    const LocalIndex* CFD_RESTRICT face_owner = m.face_owner.data();
+    const double* CFD_RESTRICT nx_ptr         = m.face_normal_x.data();
+    const double* CFD_RESTRICT ny_ptr         = m.face_normal_y.data();
+    const double* CFD_RESTRICT nz_ptr         = m.face_normal_z.data();
+
+    for (std::size_t face_idx = beg; face_idx < end; ++face_idx) {
+        const auto in = static_cast<std::size_t>(face_owner[face_idx]); // inner (real) cell
         const auto gh = n_cells + f_loc;                                  // ghost cell = n_cells + local boundary face idx
 
         // ==== unit normal ====
-        const double nx = m.face_normal_x[face_idx];
-        const double ny = m.face_normal_y[face_idx];
-        const double nz = m.face_normal_z[face_idx];
+        const double nx = nx_ptr[face_idx];
+        const double ny = ny_ptr[face_idx];
+        const double nz = nz_ptr[face_idx];
 
         // ==== Reflect velocity vector (Symmetry plane: u_n = 0) ====
         apply_slip_component_bc(s.vx[gh], s.vy[gh], s.vz[gh],
@@ -52,29 +61,46 @@ inline void symmetry_grad_kernel(fields::ConstPrimitiveView s,
                                  const mesh::MeshPart& m,
                                  const LocalIndex fbeg,
                                  const LocalIndex fend) noexcept {
+    const auto beg = static_cast<std::size_t>(fbeg);
+    const auto end = static_cast<std::size_t>(fend);
+    if (beg >= end) return;
+
     const auto n_cells = static_cast<std::size_t>(m.n_cells);
     const auto n_inner_faces = static_cast<std::size_t>(m.n_inner_faces);
-    std::size_t f_loc = static_cast<std::size_t>(fbeg) - n_inner_faces;
+    std::size_t f_loc = beg - n_inner_faces;
 
-    for (std::size_t face_idx = static_cast<std::size_t>(fbeg);
-         face_idx < static_cast<std::size_t>(fend); ++face_idx) {
-        const auto in = static_cast<std::size_t>(m.face_owner[face_idx]); // inner (real) cell
+    // Unpack topology and metric arrays with restrict
+    const LocalIndex* CFD_RESTRICT face_owner = m.face_owner.data();
+    const double* CFD_RESTRICT nx_ptr         = m.face_normal_x.data();
+    const double* CFD_RESTRICT ny_ptr         = m.face_normal_y.data();
+    const double* CFD_RESTRICT nz_ptr         = m.face_normal_z.data();
+
+    const double* CFD_RESTRICT fcx_ptr = m.face_centroid_x.data();
+    const double* CFD_RESTRICT fcy_ptr = m.face_centroid_y.data();
+    const double* CFD_RESTRICT fcz_ptr = m.face_centroid_z.data();
+
+    const double* CFD_RESTRICT ccx_ptr = m.cell_centroid_x.data();
+    const double* CFD_RESTRICT ccy_ptr = m.cell_centroid_y.data();
+    const double* CFD_RESTRICT ccz_ptr = m.cell_centroid_z.data();
+
+    for (std::size_t face_idx = beg; face_idx < end; ++face_idx) {
+        const auto in = static_cast<std::size_t>(face_owner[face_idx]); // inner (real) cell
         const auto gh = n_cells + f_loc;                                  // ghost cell = n_cells + local boundary face idx
 
         // ==== unit normal ====
-        const double nx = m.face_normal_x[face_idx];
-        const double ny = m.face_normal_y[face_idx];
-        const double nz = m.face_normal_z[face_idx];
+        const double nx = nx_ptr[face_idx];
+        const double ny = ny_ptr[face_idx];
+        const double nz = nz_ptr[face_idx];
 
         // ==== face center ====
-        const double fcx = m.face_centroid_x[face_idx];
-        const double fcy = m.face_centroid_y[face_idx];
-        const double fcz = m.face_centroid_z[face_idx];
+        const double fcx = fcx_ptr[face_idx];
+        const double fcy = fcy_ptr[face_idx];
+        const double fcz = fcz_ptr[face_idx];
 
         // ==== inner cell center ====
-        const double ccx = m.cell_centroid_x[in];
-        const double ccy = m.cell_centroid_y[in];
-        const double ccz = m.cell_centroid_z[in];
+        const double ccx = ccx_ptr[in];
+        const double ccy = ccy_ptr[in];
+        const double ccz = ccz_ptr[in];
 
         // ==== vector from cell center to face center ====
         const double rcfx = fcx - ccx;

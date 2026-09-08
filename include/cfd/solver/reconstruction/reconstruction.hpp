@@ -9,7 +9,10 @@
 #include <concepts>
 #include <cstddef>
 
+#include "cfd/core/types.hpp"
 #include "cfd/mesh/localmesh.hpp"
+#include "cfd/mesh/aux_geometry.hpp"
+#include "cfd/mesh/aux_connectivity.hpp"
 #include "cfd/solver/fields/fields_view.hpp"
 
 namespace cfd::solver::recon {
@@ -31,29 +34,27 @@ struct ReconField {
 template <typename R>
 concept ReconstructionPolicy = requires(
     const R& r,
-    const mesh::MeshPart& mp,
     const ReconField& s,
-    typename R::Geometry& g,
+    const mesh::MeshPart& mesh,
+    const mesh::MeshAuxGeometry& aux_geom,
     std::size_t f,
     std::size_t c0,
     std::size_t c1,
     std::size_t cg,
-    double qL[5],
-    double qR[5]
-) {
+    double qL[constants::kNumVars],
+    double qR[constants::kNumVars]) {
+
     // 1. Static compile-time metadata
     { R::kNeedsGradients } -> std::convertible_to<bool>;
+    { R::kAuxGeometry } -> std::convertible_to<mesh::AuxGeomType>;
+    { R::kAuxConnectivity } -> std::convertible_to<mesh::AuxConnType>;
     { R::name() } -> std::convertible_to<const char*>;
 
-    // 2. Precomputed static geometry type & builder
-    typename R::Geometry;
-    { R::build_geometry(mp) } -> std::same_as<typename R::Geometry>;
+    // 2. Evaluation on interior faces [0, n_inner_faces)
+    { R::face_states(s, mesh, aux_geom, f, c0, c1, qL, qR) } noexcept;
 
-    // 3. Evaluation on interior faces [0, n_inner_faces)
-    { R::face_states(s, g, f, c0, c1, qL, qR) } noexcept;
-
-    // 4. Evaluation on boundary faces [n_inner_faces, n_faces)
-    { R::boundary_face_states(s, g, f, c0, cg, qL, qR) } noexcept;
+    // 3. Evaluation on boundary faces [n_inner_faces, n_faces)
+    { R::boundary_face_states(s, mesh, aux_geom, f, c0, cg, qL, qR) } noexcept;
 };
 
 } // namespace cfd::solver::recon

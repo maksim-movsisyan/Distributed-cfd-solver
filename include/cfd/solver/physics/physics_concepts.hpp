@@ -3,7 +3,8 @@
 #include <concepts>
 #include <cstddef>
 
-#include "cfd/mesh/localmesh.hpp"
+#include "cfd/mesh/aux_connectivity.hpp"
+#include "cfd/mesh/aux_geometry.hpp"
 
 namespace cfd::solver::physics {
 
@@ -12,11 +13,13 @@ namespace cfd::solver::physics {
  * @brief Static interface contract for general physics - mean flow + modules.
  */
 template <typename P>
-concept PhysicsGeneral = requires(const mesh::MeshPart& mp) {
+concept PhysicsGeneral = requires() {
     // 1. Equation-set metadata
     { P::kNumVars } -> std::convertible_to<std::size_t>;  // mean-flow variables
     { P::kHasViscous } -> std::convertible_to<bool>;      // adds viscous face fluxes
     { P::kNeedsGradients } -> std::convertible_to<bool>;  // forces cell gradients
+    { P::kAuxGeometry } -> std::convertible_to<mesh::AuxGeomType>;
+    { P::kAuxConnectivity } -> std::convertible_to<mesh::AuxConnType>;
     { P::name() } -> std::convertible_to<const char*>;
 
     // 2. Physics-stack composition metadata (zero for plain equation sets)
@@ -25,10 +28,6 @@ concept PhysicsGeneral = requires(const mesh::MeshPart& mp) {
     { P::kHasEddyViscosity } -> std::convertible_to<bool>;    // provides mut data
     { P::kNeedsFaceMdot } -> std::convertible_to<bool>;       // consumes face mass flux
     { P::kNeedsWallDist } -> std::convertible_to<bool>;       // consumes wall distance
-
-    // 3. Mesh-fixed geometry type & builder
-    typename P::Geometry;
-    { P::build_geometry(mp) } -> std::same_as<typename P::Geometry>;
 
 };
 

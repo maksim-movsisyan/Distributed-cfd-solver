@@ -14,58 +14,10 @@ namespace {
 constexpr int kGhostExchangeTag = 4317;
 }  // namespace
 
-struct VectorLayout::Plan {
-    MPI_Comm comm = MPI_COMM_SELF;
-    bool owns_comm = false;
-    int rank = 0;
-    int nprocs = 1;
-
-    GlobalIndex n_global = 0;
-    LocalIndex n_local = 0;
-    GlobalIndex begin = 0;
-
-    std::vector<GlobalIndex> ghosts;      // sorted unique foreign rows
-    std::vector<GlobalIndex> all_begins;  // per-rank ownership starts
-
-    // Exchange plan, grouped by neighbour rank (ascending):
-    //   send — my owned rows that other ranks ghost,
-    //   recv — ghost slots of mine that other ranks own.
-    std::vector<int> send_ranks, recv_ranks;
-    std::vector<int> send_counts, recv_counts;  // rows per neighbour
-    std::vector<int> send_displ, recv_displ;    // offsets into the idx arrays
-    std::vector<LocalIndex> send_idx;           // owned local slots
-    std::vector<LocalIndex> recv_idx;           // ghost local slots (>= n_local)
-
-    // Scratch for updateGhosts (sized for the block size in use).
-    mutable std::vector<double> send_buf, recv_buf;
-    mutable std::vector<MPI_Request> requests;
-    mutable int cached_bs = 0;
-
-    ~Plan() {
-        if (owns_comm && comm != MPI_COMM_SELF && comm != MPI_COMM_NULL) {
-            MPI_Comm_free(&comm);
-        }
-    }
-};
-
-VectorLayout::VectorLayout() : plan_(std::make_shared<Plan>()) {}
-
-MPI_Comm VectorLayout::comm() const { return plan_->comm; }
-int VectorLayout::rank() const { return plan_->rank; }
-int VectorLayout::nprocs() const { return plan_->nprocs; }
-
-GlobalIndex VectorLayout::globalSize() const { return plan_->n_global; }
-LocalIndex VectorLayout::localSize() const { return plan_->n_local; }
-GlobalIndex VectorLayout::localBegin() const { return plan_->begin; }
-
-LocalIndex VectorLayout::ghostSize() const { return static_cast<LocalIndex>(plan_->ghosts.size()); }
-const std::vector<GlobalIndex>& VectorLayout::ghostGlobalIds() const { return plan_->ghosts; }
-
 VectorLayout::VectorLayout(MPI_Comm comm, GlobalIndex n_global, LocalIndex n_local)
     : plan_(std::make_shared<Plan>()) {
     check(n_global >= 0 && n_local >= 0, comm, "VectorLayout: sizes must be non-negative");
-    check(static_cast<GlobalIndex>(n_local) <= n_global, comm,
-          "VectorLayout: local rows exceed global rows");
+    check(static_cast<GlobalIndex>(n_local) <= n_global, comm, "VectorLayout: local rows exceed global rows");
 
     Plan& p = *plan_;
     p.n_global = n_global;
@@ -131,8 +83,7 @@ void VectorLayout::setGhosts(const std::vector<GlobalIndex>& ghost_ids) {
     // ascending ranges, so upper_bound gives the (last, non-empty) owner.
     auto owner_of = [&p](GlobalIndex g) {
         return static_cast<int>(
-                   std::upper_bound(p.all_begins.begin(), p.all_begins.end(), g) -
-                   p.all_begins.begin()) - 1;
+                   std::upper_bound(p.all_begins.begin(), p.all_begins.end(), g) - p.all_begins.begin()) - 1;
     };
 
     // Ghost ids are sorted and owners are monotone in the id, so the requests
@@ -199,67 +150,55 @@ void VectorLayout::setGhosts(const std::vector<GlobalIndex>& ghost_ids) {
     }
     check(gp == p.ghosts.size(), p.comm, "VectorLayout::setGhosts: internal ghost slot mismatch");
 
-    p.cached_bs = 0;  // force scratch resize on the next update
+    const std::size_t ns = (*plan_).send_ranks.size();
+    const std::size_t nr = (*plan_).recv_ranks.size();
+    requests_.resize(ns + nr);
+    cached_bs_ = 0;  // force scratch resize on the next update
 }
 
-void VectorLayout::updateGhosts(double* values, int block_size) const {
+void VectorLayout::updateGhosts(double* values, int block_size) {
     Plan& p = *plan_;
     const std::size_t ns = p.send_ranks.size();
     const std::size_t nr = p.recv_ranks.size();
     if (ns + nr == 0) return;
     check(block_size > 0, p.comm, "VectorLayout::updateGhosts: block size must be positive");
 
-    if (p.cached_bs != block_size) {
-        std::size_t tot_send = 0, tot_recv = 0;
-        for (int c : p.send_counts) tot_send += static_cast<std::size_t>(c);
-        for (int c : p.recv_counts) tot_recv += static_cast<std::size_t>(c);
-        p.send_buf.resize(tot_send * static_cast<std::size_t>(block_size));
-        p.recv_buf.resize(tot_recv * static_cast<std::size_t>(block_size));
-        p.cached_bs = block_size;
+    if (cached_bs_ != block_size) {
+        resize_bufs(block_size);
     }
 
     // Pack owned rows for the neighbours.
-    for (std::size_t s = 0; s < ns; ++s) {
-        double* dst = p.send_buf.data() +
-                      static_cast<std::size_t>(p.send_displ[s]) * static_cast<std::size_t>(block_size);
-        for (int e = 0; e < p.send_counts[s]; ++e) {
-            const std::size_t slot = static_cast<std::size_t>(p.send_idx[static_cast<std::size_t>(
-                p.send_displ[s] + e)]);
-            std::memcpy(dst + static_cast<std::size_t>(e) * static_cast<std::size_t>(block_size),
-                        values + slot * static_cast<std::size_t>(block_size),
-                        sizeof(double) * static_cast<std::size_t>(block_size));
-        }
-    }
+    pack_values(values);
 
-    p.requests.resize(ns + nr);
-    int rq = 0;
-    for (std::size_t r = 0; r < nr; ++r) {
-        MPI_Irecv(p.recv_buf.data() +
-                      static_cast<std::size_t>(p.recv_displ[r]) * static_cast<std::size_t>(block_size),
-                  p.recv_counts[r] * block_size, MPI_DOUBLE, p.recv_ranks[r], kGhostExchangeTag,
-                  p.comm, &p.requests[static_cast<std::size_t>(rq++)]);
-    }
-    for (std::size_t s = 0; s < ns; ++s) {
-        MPI_Isend(p.send_buf.data() +
-                      static_cast<std::size_t>(p.send_displ[s]) * static_cast<std::size_t>(block_size),
-                  p.send_counts[s] * block_size, MPI_DOUBLE, p.send_ranks[s], kGhostExchangeTag,
-                  p.comm, &p.requests[static_cast<std::size_t>(rq++)]);
-    }
-    MPI_Waitall(static_cast<int>(ns + nr), p.requests.data(), MPI_STATUSES_IGNORE);
+    // Post Isend/Irecv
+    post_sr(kGhostExchangeTag);
 
-    // Scatter received values into the ghost slots.
-    for (std::size_t r = 0; r < nr; ++r) {
-        for (int e = 0; e < p.recv_counts[r]; ++e) {
-            const std::size_t slot = static_cast<std::size_t>(p.recv_idx[static_cast<std::size_t>(
-                p.recv_displ[r] + e)]);
-            const double* src =
-                p.recv_buf.data() +
-                (static_cast<std::size_t>(p.recv_displ[r]) + static_cast<std::size_t>(e)) *
-                    static_cast<std::size_t>(block_size);
-            std::memcpy(values + slot * static_cast<std::size_t>(block_size), src,
-                        sizeof(double) * static_cast<std::size_t>(block_size));
-        }
-    }
+    // Wait and unpack
+    wait_and_unpack(values, block_size);
 }
+
+void VectorLayout::updateGhosts_start(double* values, int block_size) {
+    Plan& p = *plan_;
+    const std::size_t ns = p.send_ranks.size();
+    const std::size_t nr = p.recv_ranks.size();
+    if (ns + nr == 0) return;
+    check(block_size > 0, p.comm, "VectorLayout::updateGhosts: block size must be positive");
+
+    if (cached_bs_ != block_size) {
+        resize_bufs(block_size);
+    }
+
+    // Pack owned rows for the neighbours.
+    pack_values(values);
+
+    // Post Isend/Irecv
+    post_sr(kGhostExchangeTag);
+}
+
+void VectorLayout::updateGhosts_end(double* values, int block_size) {
+    // Wait and unpack
+    wait_and_unpack(values, block_size);
+}
+
 
 }  // namespace cfd::linalg

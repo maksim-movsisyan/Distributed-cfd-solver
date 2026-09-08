@@ -7,13 +7,6 @@
 
 namespace cfd::linalg {
 
-Vector::Vector(const VectorLayout& layout, int block_size)
-    : layout_(layout), block_size_(block_size) {
-    check(block_size > 0, layout.comm(), "Vector: block size must be positive");
-    values_.assign(static_cast<std::size_t>(layout_.localSize() + layout_.ghostSize()) *
-                       static_cast<std::size_t>(block_size), 0.0);
-}
-
 void Vector::setZero() { std::fill(values_.begin(), values_.end(), 0.0); }
 
 void Vector::copyFrom(const Vector& other) {
@@ -23,7 +16,9 @@ void Vector::copyFrom(const Vector& other) {
 }
 
 void Vector::scale(double alpha) {
-    for (double& v : values_) v *= alpha;
+    const std::size_t n = scalarSize();
+    double* CFD_RESTRICT v = values_.data();
+    for (std::size_t i = 0; i < n; ++i) v[i] *= alpha;
 }
 
 void Vector::axpy(double alpha, const Vector& x) {
@@ -47,14 +42,21 @@ double Vector::dot(const Vector& other) const {
     return s;
 }
 
-double Vector::norm2() const { return std::sqrt(dot(*this)); }
+double Vector::norm2() const { 
+    const std::size_t n = ownedScalarCount();
+    const double* CFD_RESTRICT xv = values_.data();
+    double s = 0.0;
+    for (std::size_t i = 0; i < n; ++i) s += xv[i] * xv[i];
+    MPI_Allreduce(MPI_IN_PLACE, &s, 1, MPI_DOUBLE, MPI_SUM, layout_.comm());
+    return std::sqrt(s);
+}
 
 void Vector::batchedDots(std::span<const std::pair<const Vector*, const Vector*>> products,
                          std::span<double> out) {
-    check(products.size() == out.size(), MPI_COMM_WORLD,
-          "Vector::batchedDots: output size mismatch");
-    check(!products.empty(), MPI_COMM_WORLD, "Vector::batchedDots: empty input");
+    check(!products.empty(), MPI_COMM_SELF, "Vector::batchedDots: empty input");
     MPI_Comm comm = products.front().first->layout_.comm();
+    check(products.size() == out.size(), comm, "Vector::batchedDots: output size mismatch");
+    
     for (std::size_t k = 0; k < products.size(); ++k) {
         const Vector& a = *products[k].first;
         const Vector& b = *products[k].second;

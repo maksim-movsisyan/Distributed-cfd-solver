@@ -1,105 +1,131 @@
 #include "cfd/linalg/csr_matrix.hpp"
-
+#include <cstddef>
 #include <algorithm>
+#include <iterator>
 
-#include "assembly.hpp"
+#include "cfd/core/types.hpp"
 #include "cfd/linalg/types.hpp"
 
 namespace cfd::linalg {
 
-CsrMatrix::CsrMatrix(MPI_Comm comm, GlobalIndex n_global_rows, LocalIndex n_local_rows)
-    : layout_(comm, n_global_rows, n_local_rows) {}
-
-void CsrMatrix::reserve(std::size_t nnz_hint) {
-    coo_rows_.reserve(nnz_hint);
-    coo_cols_.reserve(nnz_hint);
-    coo_vals_.reserve(nnz_hint);
-}
-
-void CsrMatrix::addValue(GlobalIndex row, GlobalIndex col, double value) {
-    // Staging is always allowed: assemble() consumes the entries into a new
-    // structure, assembleValues() adds them into the existing one.
-    check(row >= layout_.localBegin() && row < layout_.localBegin() + layout_.localSize(),
-          layout_.comm(), "CsrMatrix::addValue: row not owned by this rank");
-    check(col >= 0 && col < layout_.globalSize(), layout_.comm(),
-          "CsrMatrix::addValue: column outside the global range");
-    coo_rows_.push_back(row);
-    coo_cols_.push_back(col);
-    coo_vals_.push_back(value);
-}
-
-void CsrMatrix::assemble() {
-    check(!assembled_, layout_.comm(), "CsrMatrix::assemble: already assembled");
-
-    // Ghost set = foreign columns referenced by this rank.
-    std::vector<GlobalIndex> ghosts;
-    const GlobalIndex begin = layout_.localBegin();
-    const GlobalIndex end = begin + layout_.localSize();
-    for (GlobalIndex c : coo_cols_) {
-        if (c < begin || c >= end) ghosts.push_back(c);
-    }
-    std::sort(ghosts.begin(), ghosts.end());
-    ghosts.erase(std::unique(ghosts.begin(), ghosts.end()), ghosts.end());
-    layout_.setGhosts(ghosts);  // collective
-
-    detail::assemble_coo(layout_, 1, coo_rows_, coo_cols_, coo_vals_, row_ptr_, cols_, values_,
-                         diag_idx_);
-
-    coo_rows_.clear();
-    coo_cols_.clear();
-    coo_vals_.clear();
-    coo_rows_.shrink_to_fit();
-    coo_cols_.shrink_to_fit();
-    coo_vals_.shrink_to_fit();
-    assembled_ = true;
-}
-
-void CsrMatrix::assembleValues() {
-    check(assembled_, layout_.comm(),
-          "CsrMatrix::assembleValues: structure unknown, call assemble() first");
-    const GlobalIndex begin = layout_.localBegin();
-    const std::size_t n = coo_rows_.size();
-    check(coo_vals_.size() == n, layout_.comm(),
-          "CsrMatrix::assembleValues: malformed COO staging arrays");
-    for (std::size_t e = 0; e < n; ++e) {
-        const GlobalIndex r = coo_rows_[e];
-        check(r >= begin && r < begin + layout_.localSize(), layout_.comm(),
-              "CsrMatrix::assembleValues: row not owned by this rank");
-        const LocalIndex lrow = static_cast<LocalIndex>(r - begin);
-        const LocalIndex lcol = layout_.localIndex(coo_cols_[e]);
-        check(lcol != kInvalidLocalIndex, layout_.comm(),
-              "CsrMatrix::assembleValues: column outside the ghost pattern");
-        const LocalIndex slot = detail::find_slot(row_ptr_, cols_, lrow, lcol);
-        check(slot != kInvalidLocalIndex, layout_.comm(),
-              "CsrMatrix::assembleValues: entry not present in the fixed structure");
-        values_[static_cast<std::size_t>(slot)] += coo_vals_[e];
-    }
-    coo_rows_.clear();
-    coo_cols_.clear();
-    coo_vals_.clear();
-}
-
-void CsrMatrix::apply(const Vector& x, Vector& y) const {
+void CsrMatrix::apply(const Vector& x, Vector& y, double alpha, double beta) const {
     check(assembled_, layout_.comm(), "CsrMatrix::apply: matrix not assembled");
-    check(x.blockSize() == 1 && y.blockSize() == 1, layout_.comm(),
-          "CsrMatrix::apply: block size must be 1");
-    check(x.layout().compatibleWith(layout_) && y.layout().compatibleWith(layout_),
-          layout_.comm(), "CsrMatrix::apply: incompatible vector layout");
-    check(&x != &y, layout_.comm(), "CsrMatrix::apply: x and y must be distinct");
+    const LocalIndex n_rows = layout_.localSize();
+    if (n_rows == 0) return;
 
-    const LocalIndex n = layout_.localSize();
-    const LocalIndex* CFD_RESTRICT rp = row_ptr_.data();
-    const LocalIndex* CFD_RESTRICT cj = cols_.data();
-    const double* CFD_RESTRICT av = values_.data();
-    const double* CFD_RESTRICT xv = x.data();
-    double* CFD_RESTRICT yv = y.data();
+    const LocalIndex* CFD_RESTRICT r_ptr = row_ptr_.data();
+    const LocalIndex* CFD_RESTRICT c_idx = cols_.data();
+    const double*     CFD_RESTRICT val   = values_.data();
+    
+    const double*     CFD_RESTRICT xv    = x.data();
+    double*           CFD_RESTRICT yv    = y.data();
 
-    for (LocalIndex i = 0; i < n; ++i) {
-        const LocalIndex k1 = rp[i + 1];
-        double s = 0.0;
-        for (LocalIndex k = rp[i]; k < k1; ++k) s += av[k] * xv[cj[k]];
-        yv[i] = s;
+    if (alpha == 1.0 && beta == 0.0) {
+        for (LocalIndex i = 0; i < n_rows; ++i) {
+            double sum = 0.0;
+            const LocalIndex row_start = r_ptr[i];
+            const LocalIndex row_end   = r_ptr[i + 1];
+
+            for (LocalIndex j = row_start; j < row_end; ++j) {
+                sum += val[j] * xv[c_idx[j]];
+            }
+            yv[i] = sum;
+        }
+    } else if (beta == 1.0) {
+        for (LocalIndex i = 0; i < n_rows; ++i) {
+            double sum = 0.0;
+            const LocalIndex row_start = r_ptr[i];
+            const LocalIndex row_end   = r_ptr[i + 1];
+
+            for (LocalIndex j = row_start; j < row_end; ++j) {
+                sum += val[j] * xv[c_idx[j]];
+            }
+            yv[i] += alpha * sum;
+        }
+    } else if (beta != 0.0) {
+        for (LocalIndex i = 0; i < n_rows; ++i) {
+            double sum = 0.0;
+            const LocalIndex row_start = r_ptr[i];
+            const LocalIndex row_end   = r_ptr[i + 1];
+
+            for (LocalIndex j = row_start; j < row_end; ++j) {
+                sum += val[j] * xv[c_idx[j]];
+            }
+            yv[i] = alpha * sum + beta * yv[i];
+        }
+    } else {
+        for (LocalIndex i = 0; i < n_rows; ++i) {
+            double sum = 0.0;
+            const LocalIndex row_start = r_ptr[i];
+            const LocalIndex row_end   = r_ptr[i + 1];
+
+            for (LocalIndex j = row_start; j < row_end; ++j) {
+                sum += val[j] * xv[c_idx[j]];
+            }
+            yv[i] = alpha * sum;
+        }
     }
+}
+
+void CsrMatrix::assebmle(const std::vector<GlobalIndex>& sorted_unique_ghost_gids,
+                         const std::vector<LocalIndex>& dual_graph_off,
+                         const std::vector<LocalIndex>& dual_graph_val) {
+    // 0. get number of graph vertices (matrix rows == owned cells)
+    const std::size_t n_own = dual_graph_off.size() - 1;
+    check(layout_.localSize() == static_cast<LocalIndex>(n_own), layout_.comm(),
+          "CsrMatrix::assemble: layout local size does not match graph row count");
+
+    row_ptr_.resize(n_own + 1, 0);
+    diag_idx_.resize(n_own);
+    
+    // 1. counting number of cols per each row (== 1 + number of neighbors)
+    // loop over all own graph vertices
+    for (std::size_t c = 0; c < n_own; ++c) { 
+        const LocalIndex ncols = 1 + (dual_graph_off[c + 1] - dual_graph_off[c]);
+        row_ptr_[c + 1] = row_ptr_[c] + ncols;
+    }
+
+    // 2. fill column indices
+    const std::size_t nnz = static_cast<std::size_t>(row_ptr_[n_own]);
+    cols_.resize(nnz);
+    values_.resize(nnz, 0.0);
+
+    layout_.setGhosts(sorted_unique_ghost_gids);
+
+    std::size_t global_count = 0;
+
+    // loop over all own graph vertices
+    for (std::size_t c = 0; c < n_own; ++c) {
+        const std::size_t row_start_pos = global_count;
+        
+        cols_[static_cast<std::size_t>(row_ptr_[c]++)] = static_cast<LocalIndex>(c);
+        std::size_t count = 1;
+
+        const std::size_t ptr1 = static_cast<std::size_t>(dual_graph_off[c]);
+        const std::size_t ptr2 = static_cast<std::size_t>(dual_graph_off[c + 1]);
+        
+        for (std::size_t e = ptr1; e < ptr2; ++e) {
+            cols_[static_cast<std::size_t>(row_ptr_[c]++)] = dual_graph_val[e];
+            ++count;
+        }
+
+        auto it_beg = cols_.begin() + static_cast<std::ptrdiff_t>(row_start_pos);
+        auto it_end = it_beg + static_cast<std::ptrdiff_t>(count);
+        std::sort(it_beg, it_end);
+
+        auto it = std::lower_bound(it_beg, it_end, static_cast<LocalIndex>(c));
+        diag_idx_[c] = static_cast<LocalIndex>(row_start_pos) + static_cast<LocalIndex>(std::distance(it_beg, it));
+
+        global_count += count;
+    }
+    
+    // 3. restore row pointers
+    for (std::size_t c = n_own; c > 0; --c) { 
+        row_ptr_[c] = row_ptr_[c - 1];
+    }
+    row_ptr_[0] = 0;
+
+    assembled_ = true;
 }
 
 }  // namespace cfd::linalg

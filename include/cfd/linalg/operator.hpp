@@ -31,14 +31,14 @@ public:
     virtual Vector makeVector() const = 0;
 
     /**
-     * @brief y = A x (owned part of y; ghost slots of y are not touched).
+     * @brief y = alpha * A * x + beta * y (owned part of y; ghost slots of y are not touched).
      *
      * Contract:
      *  - the ghost slots of `x` must be CURRENT (caller calls
      *    x.updateGhosts() first) — kernels index straight into them;
      *  - `x` and `y` must be distinct vectors (no aliasing).
      */
-    virtual void apply(const Vector& x, Vector& y) const = 0;
+    virtual void apply(const Vector& x, Vector& y, double alpha = 1.0, double beta = 0.0) const = 0;
 };
 
 }  // namespace cfd::linalg

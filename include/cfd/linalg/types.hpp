@@ -30,7 +30,7 @@ template <typename Message>
 inline void check(bool condition, MPI_Comm comm, Message&& message) {
     if (!condition) fatal(comm, std::forward<Message>(message));
 }
-
+ 
 // --- Iterative solvers -------------------------------------------------------
 
 enum class SolverStatus {

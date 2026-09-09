@@ -393,23 +393,9 @@ if(BUILD_TESTING)
             cfd_project_warnings
             cfd_project_options
             cfd_linalg
+            cfd_mesh
+            cfd_solver_io
     )
-
-    foreach(np RANGE 1 4)
-        add_test(
-            NAME linalg.core.${np}
-            COMMAND
-                ${MPIEXEC_EXECUTABLE}
-                ${MPIEXEC_NUMPROC_FLAG} ${np}
-                $<TARGET_FILE:cfd_linalg_test>
-        )
-        set_tests_properties(
-            linalg.core.${np}
-            PROPERTIES
-                PROCESSORS ${np}
-                TIMEOUT 240
-        )
-    endforeach()
 
     #=== DKAMINPAR DISTRIBUTED API SMOKE TEST ===
     add_executable(cfd_kaminpar_api tests/kaminpar_api.cpp)

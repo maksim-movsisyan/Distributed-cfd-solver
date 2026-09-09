@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <sstream>
 
-#include "bsr_kernels.hpp"
+#include "cfd/linalg/bsr_helpers.hpp"
 #include "cfd/linalg/bsr_matrix.hpp"
 #include "cfd/linalg/csr_matrix.hpp"
 #include "cfd/linalg/types.hpp"

@@ -20,7 +20,7 @@ public:
 
     IterationResult solve(const LinearOperator& A, const Preconditioner& M, Vector& x,
                           const Vector& b) override;
-
+ 
 private:
     void ensureWorkspace(const Vector& prototype);
 

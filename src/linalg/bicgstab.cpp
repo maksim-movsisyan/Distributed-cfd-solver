@@ -8,7 +8,7 @@
 namespace cfd::linalg {
 
 namespace {
-
+ 
 const char* status_name(SolverStatus s) {
     switch (s) {
         case SolverStatus::Converged: return "converged";
@@ -30,13 +30,13 @@ void BiCGSTAB::ensureWorkspace(const Vector& prototype) {
                     r_.layout().compatibleWith(prototype.layout());
     if (ok) return;
     r_ = Vector(prototype.layout(), prototype.blockSize());
-    r0_ = r_;
-    p_ = r_;
-    v_ = r_;
-    s_ = r_;
-    t_ = r_;
-    phat_ = r_;
-    shat_ = r_;
+    r0_ = Vector(prototype.layout(), prototype.blockSize());
+    p_ = Vector(prototype.layout(), prototype.blockSize());
+    v_ = Vector(prototype.layout(), prototype.blockSize());
+    s_ = Vector(prototype.layout(), prototype.blockSize());
+    t_ = Vector(prototype.layout(), prototype.blockSize());
+    phat_ = Vector(prototype.layout(), prototype.blockSize());
+    shat_ = Vector(prototype.layout(), prototype.blockSize());
 }
 
 IterationResult BiCGSTAB::solve(const LinearOperator& A, const Preconditioner& M, Vector& x,

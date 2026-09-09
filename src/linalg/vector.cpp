@@ -4,7 +4,7 @@
 #include <cmath>
 
 #include "cfd/linalg/types.hpp"
-
+ 
 namespace cfd::linalg {
 
 void Vector::setZero() { std::fill(values_.begin(), values_.end(), 0.0); }

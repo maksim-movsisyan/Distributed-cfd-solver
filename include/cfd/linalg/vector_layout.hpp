@@ -150,7 +150,7 @@ private:
             }
         }
     };
-
+ 
     std::shared_ptr<Plan> plan_;  // shared: copies of a layout share the plan
 
      // Scratch for updateGhosts (sized for the block size in use).

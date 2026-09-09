@@ -8,7 +8,7 @@ namespace cfd::linalg {
 /**
  * @class Preconditioner
  * @brief Abstract M ≈ A applied as z = M^{-1} r.
- *
+ * 
  * setup() binds the preconditioner to a concrete operator, typically right
  * after matrix assembly (and again whenever the matrix values change enough
  * to warrant refactoring). apply() is const so solvers can cache and reuse

@@ -131,7 +131,7 @@ void VectorLayout::setGhosts(const std::vector<GlobalIndex>& ghost_ids) {
             p.send_idx.push_back(static_cast<LocalIndex>(g - p.begin));
         }
     }
-
+ 
     // Ghost slots I read, grouped by owning rank, in the order I sent them.
     p.recv_ranks.clear();
     p.recv_counts.clear();

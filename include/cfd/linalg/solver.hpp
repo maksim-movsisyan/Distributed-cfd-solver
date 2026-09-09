@@ -25,7 +25,7 @@ public:
 
     virtual const char* name() const = 0;
 
-    /**
+    /** 
      * @brief Solves A x = b starting from the initial guess in `x`
      * (overwritten with the solution).
      *

@@ -20,7 +20,7 @@ namespace cfd::linalg {
 class LinearOperator {
 public:
     virtual ~LinearOperator() = default;
-
+ 
     virtual GlobalIndex globalRows() const = 0;
     virtual LocalIndex localRows() const = 0;
     /// Doubles per row slot: 1 for CSR, the block size for BSR.

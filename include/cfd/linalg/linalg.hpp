@@ -3,7 +3,7 @@
 // Self-contained: MPI + cfd/core/types.hpp only — no mesh, halo-exchanger or
 // solver-level dependencies. See src/linalg/README.md for the architecture.
 #pragma once
-
+ 
 #include "cfd/linalg/bicgstab.hpp"
 #include "cfd/linalg/bsr_matrix.hpp"
 #include "cfd/linalg/csr_matrix.hpp"

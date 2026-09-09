@@ -9,8 +9,8 @@ class BsrMatrix;
 
 /**
  * @class IdentityPreconditioner
- * @brief M = I: the null preconditioner (useful for testing and for measuring
- * preconditioner benefit). apply() is a copy plus one halo exchange to honor
+ * @brief M = I: the null preconditioner
+ * apply() is a copy plus one halo exchange to honor
  * the Preconditioner contract.
  */
 class IdentityPreconditioner : public Preconditioner {

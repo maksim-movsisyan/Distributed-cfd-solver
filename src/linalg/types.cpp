@@ -6,7 +6,7 @@
 namespace cfd::linalg {
 
 void fatal(MPI_Comm comm, const std::string& what) { fatal(comm, what.c_str()); }
- 
+
 void fatal(MPI_Comm comm, const char* what) {
     int rank = 0;
     if (comm != MPI_COMM_NULL) {

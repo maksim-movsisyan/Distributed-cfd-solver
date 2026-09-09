@@ -35,7 +35,7 @@ public:
         values_.assign(static_cast<std::size_t>(layout_.localSize() + layout_.ghostSize()) *
                           static_cast<std::size_t>(block_size), 0.0);
     }
-
+ 
     // copy & move semantics
     Vector(const Vector&) = delete;
     Vector& operator=(const Vector&) = delete;

@@ -12,7 +12,7 @@
 #include "cfd/core/types.hpp"
 
 namespace cfd::linalg {
-
+ 
 // The module reuses the project-wide index vocabulary:
 //   GlobalIndex — unique row / column id across all ranks,
 //   LocalIndex  — slot in rank-local arrays (owned block first, ghosts after).

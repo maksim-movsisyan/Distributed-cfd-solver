@@ -41,9 +41,9 @@ public:
     bool assembled() const { return assembled_; }
 
     // --- graph-based assembling (n_total = own + ghosts)---
-    void assebmle(const std::vector<GlobalIndex>& sorted_unique_ghost_gids,
+    void assemble(const std::vector<GlobalIndex>& sorted_unique_ghost_gids,
                   const std::vector<LocalIndex>& dual_graph_off,
-                  const std::vector<LocalIndex>& dual_graph_val) ;
+                  const std::vector<LocalIndex>& dual_graph_val);
 
 private:
     VectorLayout layout_;

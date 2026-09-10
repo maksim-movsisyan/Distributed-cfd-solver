@@ -4,6 +4,8 @@
 #pragma once
 
 #include "cfd/solver/fields/update_ops.hpp"
+#include "cfd/mesh/aux_connectivity.hpp"
+#include "cfd/mesh/aux_geometry.hpp"
 
 namespace cfd::solver::time {
 
@@ -18,6 +20,9 @@ public:
     using Operator = Op;
 
     static constexpr bool kNeedsPrevSnapshot = false;
+    static constexpr bool kNeedsMatrix = false;
+    static constexpr mesh::AuxConnType kAuxConnectivity = mesh::AuxConnType::None;
+    static constexpr mesh::AuxGeomType kAuxGeometry = mesh::AuxGeomType::None;
     static constexpr const char* name() noexcept { return "FORWARD_EULER"; }
 
     void advance(Op& op) const noexcept {

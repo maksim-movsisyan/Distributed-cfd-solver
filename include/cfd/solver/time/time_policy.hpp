@@ -16,6 +16,8 @@
 #pragma once
 
 #include <concepts>
+#include "cfd/mesh/aux_connectivity.hpp"
+#include "cfd/mesh/aux_geometry.hpp"
 
 namespace cfd::solver::time {
 
@@ -31,6 +33,9 @@ concept TimeIntegrationPolicy = requires(typename T::Operator& op, T t) {
 
     // 1. Static compile-time metadata
     { T::kNeedsPrevSnapshot } -> std::convertible_to<bool>;
+    { T::kNeedsMatrix } -> std::convertible_to<bool>;
+    { T::kAuxConnectivity } -> std::convertible_to<mesh::AuxConnType>;
+    { T::kAuxGeometry } -> std::convertible_to<mesh::AuxGeomType>;
     { T::name() } -> std::convertible_to<const char*>;
 
     // 2. One full step: stages + block updates + ping-pong

@@ -3,6 +3,7 @@
 #include "cfd/linalg/operator.hpp"
 #include "cfd/linalg/preconditioner.hpp"
 #include "cfd/linalg/types.hpp"
+#include "cfd/linalg/config.hpp"
 #include "cfd/linalg/vector.hpp"
 
 namespace cfd::linalg {

@@ -41,6 +41,7 @@
 #include "cfd/solver/physics/physics_concepts.hpp"
 #include "cfd/solver/reconstruction/reconstruction.hpp"
 #include "cfd/solver/residual_kernel.hpp"
+#include "cfd/solver/jacobian_kernel.hpp"
 #include "cfd/solver/time/time_policy.hpp"
 
 namespace cfd::solver {
@@ -60,9 +61,13 @@ public:
     static constexpr bool kHasModules = PhysPolicy::kNumExtraVars > 0;
 
     static constexpr mesh::AuxGeomType kAuxGeometry = ReconPolicy::kAuxGeometry|
-                                                      PhysPolicy::kAuxGeometry; 
+                                                      PhysPolicy::kAuxGeometry|
+                                                      TimePolicy::kAuxGeometry; 
     static constexpr mesh::AuxConnType kAuxConnectivity = ReconPolicy::kAuxConnectivity|
-                                                          PhysPolicy::kAuxConnectivity; 
+                                                          PhysPolicy::kAuxConnectivity|
+                                                          TimePolicy::kAuxConnectivity; 
+
+    static constexpr bool kNeedsMatrix = TimePolicy::kNeedsMatrix;
 
     Solver(const SolverConfig& cfg,
            const bc::BoundaryConfig& bcfg,
@@ -71,10 +76,14 @@ public:
            const mesh::MeshPart& mesh,
            const MPI_Comm comm)
         : mesh_(mesh),
+          aux_geom_(),
+          aux_conn_(),
           cfg_(cfg),
           eos_(eos),
           phys_(phys),
-          kernel_(mesh, this->aux_conn_, this->aux_geom_, eos, phys),
+          residual_kernel_(mesh, aux_conn_, aux_geom_, eos, phys),
+          jacobian_kernel_(mesh, aux_conn_, aux_geom_, eos, phys),
+          bcs_(),
           halo_(mesh, comm),
           comm_(comm) {
 
@@ -138,6 +147,10 @@ public:
             phys_.template initialize<EOS>(mesh, aux_conn_, aux_geom_, bcfg, eos_, halo_, comm_);
         }
 
+        // 8. For implicit scheme
+        if constexpr (kNeedsMatrix) {
+            time_.system_setup(mesh, aux_conn_, comm_);
+        }
     }
 
     int run() {
@@ -269,7 +282,7 @@ public:
 
         // 6. Mean-flow flux sweeps on the reconstructed primitive states
         //    (stores the face mass flux for module convection when requested)
-        kernel_.apply(q_view_.as_const(), grad_view_.as_const(), phi_view_.as_const(),
+        residual_kernel_.apply(q_view_.as_const(), grad_view_.as_const(), phi_view_.as_const(),
                       res_view_, lam_.data(), mut_ptr(),
                       PhysPolicy::kNeedsFaceMdot ? mdot_.data() : nullptr);
 
@@ -284,6 +297,13 @@ public:
         }
     }
 
+    void assemble_jacobian(const LocalIndex* CFD_RESTRICT row_ptr,
+                           const LocalIndex* CFD_RESTRICT cols,
+                           const LocalIndex* CFD_RESTRICT diag_idx,
+                           double* CFD_RESTRICT values) {
+        jacobian_kernel_.apply(q_view_.as_const(), row_ptr, cols, diag_idx, values, alpha_.data(), mut_ptr());
+    }
+
     void compute_dt() noexcept {
         const std::size_t n_own = static_cast<std::size_t>(mesh_.n_own);
         const double* CFD_RESTRICT lam = lam_.data();
@@ -291,10 +311,23 @@ public:
         double* CFD_RESTRICT dt        = dt_.data();
         double* CFD_RESTRICT alpha     = alpha_.data();
 
-        for (std::size_t c = 0; c < n_own; ++c) {
-            const double l = std::max(lam[c], constants::kSpectralRadiusFloor);
-            dt[c]    = cfg_.cfl * vol[c] / l;
-            alpha[c] = cfg_.cfl / l;
+        if constexpr (kNeedsMatrix) {
+            //Implicit: alpha = Volume / dt = lambda / CFL
+            const double inv_cfl = 1.0 / cfg_.cfl;
+            
+            for (std::size_t c = 0; c < n_own; ++c) {
+                const double l = std::max(lam[c], constants::kSpectralRadiusFloor);
+                dt[c]    = cfg_.cfl * vol[c] / l;
+                alpha[c] = l * inv_cfl;
+            }
+        } else {
+            // Explicit: alpha = dt / Volume = CFL / lambda  
+            for (std::size_t c = 0; c < n_own; ++c) {
+                const double l = std::max(lam[c], constants::kSpectralRadiusFloor);
+                const double cfl_over_l = cfg_.cfl / l;
+                dt[c]    = cfl_over_l * vol[c];
+                alpha[c] = cfl_over_l;
+            }
         }
     }
 
@@ -594,7 +627,7 @@ private:
         std::vector<double> energy;
 
         refresh_primitives_for_audit();
-        kernel_.boundary_integrals(q_view_.as_const(), grad_view_.as_const(),
+        residual_kernel_.boundary_integrals(q_view_.as_const(), grad_view_.as_const(),
                                    phi_view_.as_const(), mass, energy, mut_ptr());
 
         const auto n = static_cast<int>(mass.size());
@@ -668,9 +701,12 @@ private:
     SolverConfig cfg_;
     EOS eos_;
     PhysPolicy phys_;
-    ResidualKernel<EOS, FluxPolicy, ReconPolicy, PhysPolicy> kernel_;
+    ResidualKernel<EOS, FluxPolicy, ReconPolicy, PhysPolicy> residual_kernel_;
+    JacobianKernel<EOS, FluxPolicy, PhysPolicy> jacobian_kernel_;
     bc::BoundaryManager<EOS> bcs_;
     halo::HaloExchanger halo_;
+
+
 
     TimePolicy time_{};
     MPI_Comm comm_{MPI_COMM_WORLD};

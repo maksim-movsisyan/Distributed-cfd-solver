@@ -16,10 +16,14 @@
 // production use.
 #pragma once
 
+#include <sys/types.h>
 #include <memory>
 
+#include "cfd/core/types.hpp"
 #include "cfd/mpi/log.hpp"
-#include "cfd/solver/implicit/implicit_system.hpp"
+#include "cfd/solver/implicit_system.hpp"
+#include "cfd/mesh/aux_connectivity.hpp"
+#include "cfd/mesh/aux_geometry.hpp"
 
 namespace cfd::solver::time {
 
@@ -34,63 +38,49 @@ public:
     using Operator = Op;
 
     static constexpr bool kNeedsPrevSnapshot = false;
+    static constexpr bool kNeedsMatrix = true;
+    static constexpr mesh::AuxConnType kAuxConnectivity = mesh::AuxConnType::CellCellsByFace;   // dual graph for matrix initialization
+    static constexpr mesh::AuxGeomType kAuxGeometry = mesh::AuxGeomType::None;
     static constexpr const char* name() noexcept { return "BACKWARD_EULER"; }
 
+    void system_setup(const mesh::MeshPart& mesh, const mesh::MeshAuxConnectivity& aux_conn, MPI_Comm comm) {
+        system_ = std::make_unique<MeanFlowSystem>(mesh, aux_conn, comm);
+    }
+
     void advance(Op& op) noexcept {
-        // 1. Residual and state services at u^n (primitives, halos, BC ghosts —
-        //    the Jacobian sweep gathers these directly).
         op.evaluate_residual(op.u_slots());
         op.compute_dt();
 
-        // 2. One-time system structure from the mesh adjacency.
-        if (!system_) {
-            system_ = std::make_unique<implicit::MeanFlowSystem>(
-                op.mesh(), op.mpi_comm(), op.config().implicit_tolerance,
-                op.config().implicit_max_iterations);
-            system_->build();
-            if constexpr (Op::kHasModules) {
-                mpi::log_stat("BACKWARD_EULER: physics modules are frozen during the "
-                              "implicit step (mean-flow matrix only)");
-            }
+        op.assemble_jacobian(system_->matrix().rowPtr().data(),
+                             system_->matrix().cols().data(),
+                             system_->matrix().diagIndex().data(),
+                             system_->matrix().valuesData());
+
+        set_rhs_and_zero_du(op.res_slots());
+
+        if (!system_ -> solve()) {
+            mpi::log_stat("BACKWARD_EULER: linear solve stopped does not reach target tolerance");
         }
 
-        // 3. Assemble (V/dt + dR/dU) natively: in-place block fills.
-        system_->begin_assembly();
-        op.assemble_mean_flow_jacobian(*system_);
-        const auto n_own = op.n_owned();
-        const double* CFD_RESTRICT dt = op.local_dt();
-        const double* CFD_RESTRICT vol = op.mesh().cell_volume.data();
-        for (std::size_t c = 0; c < n_own; ++c) {
-            system_->add_time_term(static_cast<LocalIndex>(c), vol[c] / dt[c]);
-        }
-
-        // 4. Solve for the increment du.
-        system_->set_rhs_from_residual(op.res_slots());
-        system_->solve();
-        if (!system_->linear_converged()) {
-            mpi::log_stat("BACKWARD_EULER: linear solve stopped at %d iterations "
-                          "(using the current increment)",
-                          system_->linear_iterations());
-        } else if (g_verbose >= 1) {
-            mpi::log_stat("BACKWARD_EULER: linear solve %d iterations",
-                          system_->linear_iterations());
-        }
-
-        // 5. Update: mean flow u^{n+1} = u^n + du; module slots copied frozen.
-        const double* CFD_RESTRICT du = system_->increment();
+        const double* CFD_RESTRICT du = system_->du_data();
         const auto u = op.u_slots();
         const auto stage = op.stage_slots();
+
         for (std::size_t v = 0; v < 5; ++v) {
             double* CFD_RESTRICT dst = stage[v];
             const double* CFD_RESTRICT src = u[v];
+            const std::size_t n_own = system_->nown();
+
             for (std::size_t c = 0; c < n_own; ++c) {
-                dst[c] = src[c] + du[c * implicit::MeanFlowSystem::kNumVars + v];
+                dst[c] = src[c] + du[c * constants::kNumVars + v];
             }
         }
+
         if constexpr (Op::kHasModules) {
             for (std::size_t v = 5; v < u.size(); ++v) {
                 double* CFD_RESTRICT dst = stage[v];
                 const double* CFD_RESTRICT src = u[v];
+                const std::size_t n_own = system_->nown();
                 for (std::size_t c = 0; c < n_own; ++c) {
                     dst[c] = src[c];
                 }
@@ -102,7 +92,22 @@ public:
     }
 
 private:
-    std::unique_ptr<implicit::MeanFlowSystem> system_;
+    std::unique_ptr<MeanFlowSystem> system_;
+
+    void set_rhs_and_zero_du(std::span<double* const> res_slots) {
+        double* CFD_RESTRICT b = system_->rhs_data();
+        double* CFD_RESTRICT du = system_->du_data();
+        const std::size_t n_own = system_->nown();
+
+        for (std::size_t c = 0; c < n_own; ++c) {
+            for (std::size_t v = 0; v < constants::kNumVars; ++v) {
+                b[c * constants::kNumVars + v] = -res_slots[v][c];
+                du[c * constants::kNumVars + v] = 0.0;
+            }
+        }
+    }
+
+
 };
 
 }  // namespace cfd::solver::time

@@ -31,8 +31,8 @@ SolverConfig parse_solver_config(const std::string& path, const MPI_Comm comm) {
     const std::string raw_content = broadcast_file_content(path, comm);
     const toml::table root = parse_in_memory_or_die(raw_content, path, comm);
 
-        check_allowed_keys(root, {"flow", "initial", "numerics", "time", "output", "turbulence"},
-                       "'" + path + "'", comm);
+    check_allowed_keys(root, {"flow", "initial", "numerics", "time", "output", "turbulence"},
+                    "'" + path + "'", comm);
 
     { // [flow]
         const toml::table* t = req_table(root, "flow", path, comm);

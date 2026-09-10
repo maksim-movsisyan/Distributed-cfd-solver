@@ -39,19 +39,6 @@ enum class SolverStatus {
     MaxIterations, // iteration budget exhausted
 };
 
-enum class Verbosity { Silent, Summary, Verbose };
-
-struct SolverParams {
-    // Convergence test: ||r||_2 <= max(relative_tolerance * ||b||_2, absolute_tolerance).
-    double relative_tolerance = 1.0e-8;
-    double absolute_tolerance = 1.0e-30;
-    int max_iterations = 500;
-    Verbosity verbosity = Verbosity::Summary;
-    // Recompute the true residual ||b - A x||_2 once after the loop and report
-    // it in IterationResult (costs one extra SpMV per solve).
-    bool verify_final_residual = true;
-};
-
 struct IterationResult {
     SolverStatus status = SolverStatus::MaxIterations;
     int iterations = 0;

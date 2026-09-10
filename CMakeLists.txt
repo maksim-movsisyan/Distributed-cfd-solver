@@ -161,6 +161,7 @@ add_library(
         src/linalg/bsr_matrix.cpp
         src/linalg/preconditioners.cpp
         src/linalg/bicgstab.cpp
+        src/linalg/config.cpp
 )
 
 target_include_directories(
@@ -168,6 +169,11 @@ target_include_directories(
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
+)
+target_include_directories(
+    cfd_linalg
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/external/tomlplusplus/include
 )
 
 target_link_libraries(

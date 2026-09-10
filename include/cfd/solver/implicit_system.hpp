@@ -43,8 +43,8 @@ public:
      * @param aux_conn          Auxiliary mesh connectivities
      * @param comm              Solver communicator.
      */
-    MeanFlowSystem(const mesh::MeshPart& mesh, const mesh::MeshAuxConnectivity& aux_conn, MPI_Comm comm)
-        : mesh_(mesh), aux_conn_(aux_conn), comm_(comm), n_own_(static_cast<std::size_t>(mesh.n_own)) {
+    MeanFlowSystem(const mesh::MeshPart& mesh, const mesh::MeshAuxConnectivity& aux_conn, const linalg::SolverParams& solver_params, MPI_Comm comm)
+        : mesh_(mesh), aux_conn_(aux_conn), solver_params_(solver_params), comm_(comm), n_own_(static_cast<std::size_t>(mesh.n_own)) {
         matrix_ = std::make_unique<linalg::BsrMatrix>(comm_, mesh_.n_cells_g, n_own_, kNumVars);
 
         const std::vector<cfd::GlobalIndex> ghost_gids = build_ghost_gids(mesh_, comm);
@@ -53,8 +53,6 @@ public:
         rhs_ = matrix_->makeVector();
         du_ = matrix_->makeVector();
         
-        // solver_params_ = linalg::parse_solver_config(const std::string &path, const MPI_Comm comm)    // TBD //
-
         if (solver_params_.type == linalg::SolverType::BICGSTAB) {
             solver_ = std::make_unique<linalg::BiCGSTAB>();
             solver_->params() = solver_params_;
@@ -90,11 +88,11 @@ public:
 private:
     const mesh::MeshPart& mesh_;
     const mesh::MeshAuxConnectivity& aux_conn_;
+    const linalg::SolverParams& solver_params_;
     MPI_Comm comm_;
     std::size_t n_own_ = 0;
     bool built_ = false;
 
-    linalg::SolverParams solver_params_;
     std::unique_ptr<linalg::IterativeSolver> solver_;
     std::unique_ptr<linalg::BsrMatrix> matrix_;
     std::unique_ptr<linalg::Preconditioner> preconditioner_;

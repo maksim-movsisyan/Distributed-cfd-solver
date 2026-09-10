@@ -14,6 +14,7 @@
 #include "cfd/core/types.hpp"
 #include "cfd/solver/gradient/gradient_manager.hpp"
 #include "cfd/solver/eos/ideal_gas.hpp"
+#include "cfd/linalg/config.hpp"
 
 namespace cfd::solver {
 
@@ -121,6 +122,9 @@ struct SolverConfig {
     // [time], implicit schemes: linear solver budget per step
     double implicit_tolerance = 1.0e-4;   // BiCGSTAB relative residual per step
     std::int64_t implicit_max_iterations = 100; // BiCGSTAB iteration cap
+
+    // [linalg]
+    linalg::SolverParams linear_solver_params;
 
     // [output]
     std::string output_dir = "out/solver";

@@ -24,6 +24,7 @@
 #include "cfd/solver/implicit_system.hpp"
 #include "cfd/mesh/aux_connectivity.hpp"
 #include "cfd/mesh/aux_geometry.hpp"
+#include "cfd/linalg/config.hpp"
 
 namespace cfd::solver::time {
 
@@ -43,8 +44,8 @@ public:
     static constexpr mesh::AuxGeomType kAuxGeometry = mesh::AuxGeomType::None;
     static constexpr const char* name() noexcept { return "BACKWARD_EULER"; }
 
-    void system_setup(const mesh::MeshPart& mesh, const mesh::MeshAuxConnectivity& aux_conn, MPI_Comm comm) {
-        system_ = std::make_unique<MeanFlowSystem>(mesh, aux_conn, comm);
+    void system_setup(const mesh::MeshPart& mesh, const mesh::MeshAuxConnectivity& aux_conn, const linalg::SolverParams& solver_params, MPI_Comm comm) {
+        system_ = std::make_unique<MeanFlowSystem>(mesh, aux_conn, solver_params, comm);
     }
 
     void advance(Op& op) noexcept {

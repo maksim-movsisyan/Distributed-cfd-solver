@@ -5,32 +5,38 @@
 #   | u | = M a               = 1041.0...   m/s
 
 [flow]
-flow_model = "VISCOUS_FLOW"
-prandtl = 0.71
+flow_model = "INVISCID_FLOW"
 eos = "IDEAL_GAS"
 gamma = 1.4
 gas_constant = 287.052874
 
 [initial]
-rho = 0.18177
-pressure = 5590.34
-velocity = [622.13, 0.0, 0.0]
+rho = 1.1768
+pressure = 101325.0
+velocity = [1041.0, 0.0, 0.0]
 
 [numerics]
 flux = "HLLC"
 reconstruction = "MUSCL"
 limiter = "VENKAT"
 venkat_k = 0.5
-gradient = "GREEN_GAUSS_FACE"
+gradient = "LEAST_SQUARES_FACE"
 
 [time]
-scheme = "FORWARD_EULER"
-cfl = 1.0
-max_iterations = 100000
+scheme = "BACKWARD_EULER"
+cfl = 25.0
+max_iterations = 500
 residual_tolerance = 1.0e-10
 
 [output]
-directory = "out/plate_muscl"
-field_interval = 25000
-residual_interval = 5000
+directory = "out/wedge_implicit_muscl"
+field_interval = 1000
+residual_interval = 250
 
+[linalg]
+solver = "BICGSTAB"
+preconditioner = "SGS"
+rel_tol = 1e-1
+abs_tol = 1e-15
+max_iter = 100
+verbosity = "Summary"

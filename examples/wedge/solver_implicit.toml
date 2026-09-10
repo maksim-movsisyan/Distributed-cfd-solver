@@ -21,11 +21,19 @@ reconstruction = "FIRST_ORDER"
 
 [time]
 scheme = "BACKWARD_EULER"
-cfl = 15.0
-max_iterations = 10000
+cfl = 25.0
+max_iterations = 500
 residual_tolerance = 1.0e-10
 
 [output]
-directory = "out/wedge"
+directory = "out/wedge_implicit"
 field_interval = 1000
 residual_interval = 250
+
+[linalg]
+solver = "BICGSTAB"
+preconditioner = "SGS"
+rel_tol = 1e-1
+abs_tol = 1e-15
+max_iter = 100
+verbosity = "Silent"

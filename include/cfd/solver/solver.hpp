@@ -149,7 +149,7 @@ public:
 
         // 8. For implicit scheme
         if constexpr (kNeedsMatrix) {
-            time_.system_setup(mesh, aux_conn_, comm_);
+            time_.system_setup(mesh, aux_conn_, cfg.linear_solver_params, comm_);
         }
     }
 

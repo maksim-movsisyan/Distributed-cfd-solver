@@ -19,6 +19,7 @@ include/cfd/                     Public headers (clean interface separation)
   ├── io/cgns/                   Parallel CGNS reader (PCGNS cgp_* API)
   ├── io/solver_mesh/            Parallel HDF5 mesh serializer and loader
   ├── io/vtk/                    Parallel VTU/PVTU export for ParaView visualization
+  ├── linalg/                    Distributed linear algebra
   ├── solver/bc                  Boundary conditions types and manager
   ├── solver/eos                 Equation of state conpect and implementations (e.g ideal gas)
   ├── solver/fields              General fields manager and fields view data structures for solvers
@@ -44,6 +45,7 @@ out/                             Output files      (git-ignored)
 - `cfd_solver_mesh_io` — High-throughput Parallel HDF5 writer/loader (`H5FD_MPIO_COLLECTIVE`).
 - `cfd_vtk_io` — Buffered parallel VTU/PVTU mesh exporters.
 - `cfd_solver` — All solver components (bc, fields, reconstructions, manages)
+- `cfd_linalg` — All linear algebra module (fully independent from other modules)
 ---
 
 ## Prerequisites
@@ -100,7 +102,7 @@ mpirun -np 4 build/release/mesh_partition mesh/mesh.cgns out/mesh.h5 \
   - `volume` — Cell finite-volume distribution.
 - Open `out/vtu/mesh_bnd.pvtu` to inspect boundary patches. Color by `patch_id` to verify boundary condition assignments.
 
-### 2. Run the Flow Solver (Compressible Euler, Phase 0)
+### 2. Run the Flow Solver
 ```bash
 mpirun -np 4 build/release/solver out/mesh.h5 \
     examples/wedge/solver.toml \
@@ -117,7 +119,7 @@ The mesh container is rank-locked: it must be run with exactly the same
 
 ### 1.Solver configuration file
 
-The main solver execution parameters are specified in a TOML file (e.g. `solver.toml`). The configuration is split into five required sections: `[flow]`, `[initial]`, `[numerics]`, `[time]`, and `[output]`.
+The main solver execution parameters are specified in a TOML file (e.g. `solver.toml`). The configuration is split into five required sections: `[flow]`, `[initial]`, `[numerics]`, `[time]`, `[output]` and `[linalg]`.
 
 <details>
 <summary><b>Solver Configuration Guide (Click to expand)</b></summary>
@@ -131,9 +133,11 @@ Defines the working fluid and equation of state.
 
 | Key | Type | Allowed Values | Description |
 |---|---|---|---|
+| `flow_model` | String | `"INVISCID_FLOW"`, `"VISCOUS_FLOW"` | Mean-flow set of equations (Euler/Navier-Stokes). |
 | `eos` | String | `"IDEAL_GAS"` | Equation of State model. |
 | `gamma` | Float | $> 0.0$ (e.g. `1.4`) | Specific heat ratio ($c_p / c_v$). |
 | `gas_constant` | Float | $> 0.0$ (e.g. `287.052874`) | Specific gas constant $R$ [$\text{J}/(\text{kg}\cdot\text{K})$]. |
+| `prandtl` | Float | $> 0.0$ (e.g. `0.71`) | Laminar Prandtl number. |
 
 ---
 
@@ -154,9 +158,10 @@ Controls numerical flux computation, spatial reconstruction order, and slope lim
 | Key | Type | Allowed Values | Default | Description |
 |---|---|---|---|---|
 | `flux` | String | `"HLLC"` | *Required* | Riemann flux solver. |
-| `reconstruction` | String | `"FIRST_ORDER"`, `"MUSCL"` | *Required* | Spatial accuracy scheme. |
+| `reconstruction` | String | `"FIRST_ORDER"`, `"MUSCL"`, `"MUSCL_DIRECTIONAL"` | *Required* | Spatial accuracy scheme. |
 | `limiter` | String | `"VENKAT"`, `"BARTH"`, `"VAN_ALBADA"` | `"VENKAT"` (Req. for `MUSCL`) | Slope limiter for gradient suppression near shocks/discontinuities. |
 | `venkat_k` | Float | $> 0.0$ | `0.5` | Threshold parameter $K$ for Venkatakrishnan limiter ($K \sim \Delta x^{3/2}$). |
+| `gradient` | String | `"GREEN_GAUSS_<FACE/CELL>"`, `"LEAST_SQUARES_<FACE/NODE>"` | `"GREEN_GAUSS_<FACE>"` | Gradient method |
 
 > **Validation Rule:** If `reconstruction = "MUSCL"`, the `limiter` key is strictly required.
 
@@ -167,7 +172,7 @@ Governs time-stepping schemes, CFL condition, and stopping criteria.
 
 | Key | Type | Allowed Values | Description |
 |---|---|---|---|
-| `scheme` | String | `"FORWARD_EULER"`, `"SSP_RK3"` | Time integration scheme (1st-order Euler or 3-stage TVD Runge-Kutta). |
+| `scheme` | String | `"FORWARD_EULER"`, `"SSP_RK3"`, `"BACKWARD_EULER"` | Time integration scheme (1st-order Euler or 3-stage TVD Runge-Kutta, Implicit Euler). |
 | `cfl` | Float | $> 0.0$ (e.g. `0.5` – `1.2`) | Courant-Friedrichs-Lewy (CFL) number. |
 | `max_iterations` | Integer | $\ge 1$ | Maximum number of time iterations to execute. |
 | `residual_tolerance` | Float | $> 0.0$ (e.g. `1e-6`) | Relative $L_2$ residual tolerance for convergence termination. |
@@ -185,35 +190,59 @@ Configures disk export frequency and console residual logging.
 
 ---
 
+#### 6. `[linalg]` — Optional module for implicit schemes
+Configures linear algebra solver. This module is always optional, some values set as a default.
+
+| Key | Type | Allowed Values | Description |
+|---|---|---|---|
+| `solver` | String | `"BICGSTAB"` | SLAE solver. |
+| `preconditioner` | String | `"None"`, `"SGS"` | Preconditioner for SLAE solver. |
+| `rel_tol` | Float | $\ge 0$ $\le 1$ (e.g. `1e-1`) | Relative tolerance. |
+| `abs_tol` | Float | $\ge 0$ (e.g. `1e-16`) | Absolute tolerance. |
+| `max_iter` | Integer | $\ge 0$ | Maximum number of iterations for SLAE solver. |
+| `verbosity` | String | `"Silent"`, `"Summary"`, `"Verbose"` | SLAE solver verbosity. |
+
+---
+
 ### Example Configuration (`solver.toml`)
 
 ```toml
 [flow]
+flow_model = "INVISCID_FLOW"
 eos = "IDEAL_GAS"
 gamma = 1.4
 gas_constant = 287.052874
 
 [initial]
-rho = 1.225
+rho = 1.1768
 pressure = 101325.0
-velocity = [250.0, 0.0, 0.0]
+velocity = [1041.0, 0.0, 0.0]
 
 [numerics]
 flux = "HLLC"
 reconstruction = "MUSCL"
 limiter = "VENKAT"
 venkat_k = 0.5
+gradient = "LEAST_SQUARES_FACE"
 
 [time]
-scheme = "SSP_RK3"
-cfl = 0.8
-max_iterations = 10000
-residual_tolerance = 1.0e-6
+scheme = "BACKWARD_EULER"
+cfl = 25.0
+max_iterations = 500
+residual_tolerance = 1.0e-10
 
 [output]
-directory = "./output"
-field_interval = 500
-residual_interval = 10
+directory = "out/wedge_implicit_muscl"
+field_interval = 1000
+residual_interval = 250
+
+[linalg]
+solver = "BICGSTAB"
+preconditioner = "SGS"
+rel_tol = 1e-1
+abs_tol = 1e-15
+max_iter = 100
+verbosity = "Summary"
 ```
 
 </details>

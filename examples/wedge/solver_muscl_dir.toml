@@ -19,11 +19,12 @@ flux = "HLLC"
 reconstruction = "MUSCL_DIRECTIONAL"
 limiter = "MINMOD_1D"
 venkat_k = 0.5
+gradient = "GREEN_GAUSS_FACE"
 
 [time]
 scheme = "FORWARD_EULER"
 cfl = 0.5
-max_iterations = 10000
+max_iterations = 5000
 residual_tolerance = 1.0e-10
 
 [output]

@@ -19,6 +19,7 @@ velocity = [622.13, 0.0, 0.0]
 [numerics]
 flux = "HLLC"
 reconstruction = "FIRST_ORDER"
+gradient = "GREEN_GAUSS_FACE"
 
 [time]
 scheme = "FORWARD_EULER"

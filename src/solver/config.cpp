@@ -31,7 +31,7 @@ SolverConfig parse_solver_config(const std::string& path, const MPI_Comm comm) {
     const std::string raw_content = broadcast_file_content(path, comm);
     const toml::table root = parse_in_memory_or_die(raw_content, path, comm);
 
-    check_allowed_keys(root, {"flow", "initial", "numerics", "time", "output", "turbulence"},
+    check_allowed_keys(root, {"flow", "initial", "numerics", "time", "output", "turbulence", "linalg"},
                     "'" + path + "'", comm);
 
     { // [flow]
@@ -192,8 +192,7 @@ SolverConfig parse_solver_config(const std::string& path, const MPI_Comm comm) {
         const toml::table* t = req_table(root, "time", path, comm);
         const std::string ctx = path + " [time]";
         check_allowed_keys(
-            *t, {"scheme", "cfl", "max_iterations", "residual_tolerance", "implicit_tolerance",
-                 "implicit_max_iterations"},
+            *t, {"scheme", "cfl", "max_iterations", "residual_tolerance"},
             ctx, comm);
         const std::string scheme = req_string(*t, "scheme", ctx, comm);
         if (scheme == "FORWARD_EULER") {
@@ -214,14 +213,6 @@ SolverConfig parse_solver_config(const std::string& path, const MPI_Comm comm) {
         }
         cfg.residual_tolerance = req_number(*t, "residual_tolerance", ctx, comm);
         check_positive(cfg.residual_tolerance, "residual_tolerance", ctx, comm);
-        // Implicit-scheme linear solver budget (optional)
-        cfg.implicit_tolerance = opt_number(*t, "implicit_tolerance", 1.0e-4);
-        check_positive(cfg.implicit_tolerance, "implicit_tolerance", ctx, comm);
-        cfg.implicit_max_iterations =
-            opt_integer(*t, "implicit_max_iterations", 100);
-        if (cfg.implicit_max_iterations < 1) {
-            fail(comm, ctx + ": 'implicit_max_iterations' must be >= 1");
-        }
     }
 
     { // [output]
@@ -234,6 +225,54 @@ SolverConfig parse_solver_config(const std::string& path, const MPI_Comm comm) {
         cfg.residual_interval = req_integer(*t, "residual_interval", ctx, comm);
         if (cfg.field_interval < 0 || cfg.residual_interval < 1) {
             fail(comm, ctx + ": intervals must be >= 0 (field) / >= 1 (residual)");
+        }
+    }
+
+    { // [linalg] - optional linear algebra module section
+        const toml::node* node = root.get("linalg");
+        if (node != nullptr) {
+            const auto* t = node->as_table();
+            if (t == nullptr) {
+                fail(comm, path + ": [linalg] must be a table");
+            }
+            const std::string ctx = path + " [linalg]";
+            check_allowed_keys(*t, {"solver", "preconditioner", "rel_tol", "abs_tol",
+                                            "max_iter", "verbosity", "res_verify"}, ctx, comm);
+
+            std::string type = opt_string(*t, "solver", "BICGSTAB");
+            if (type == "BICGSTAB") {
+                cfg.linear_solver_params.type = linalg::SolverType::BICGSTAB;
+            } else {
+                fail(comm, ctx + ": unsupported solver type '" + type + "' (available: BICGSTAB)");
+            }
+
+            std::string precond_type = opt_string(*t, "preconditioner", "None");
+            if (precond_type == "None") {
+                cfg.linear_solver_params.precond_type = linalg::PreconditionerType::None;
+            } else if (precond_type == "SGS") {
+                cfg.linear_solver_params.precond_type = linalg::PreconditionerType::SGS;
+            } else {
+                fail(comm, ctx + ": unsupported preconditioner type '" + precond_type + "' (available: None, SGS)");
+            }
+
+            cfg.linear_solver_params.relative_tolerance = opt_number(*t, "rel_tol", 1e-1);
+            cfg.linear_solver_params.absolute_tolerance = opt_number(*t, "abs_tol", 1e-30);
+            cfg.linear_solver_params.max_iterations = static_cast<int>(opt_integer(*t, "max_iter", 100));
+
+            std::string verbosity = opt_string(*t, "verbosity", "Silent");
+            if (verbosity == "Silent") {
+                cfg.linear_solver_params.verbosity = linalg::Verbosity::Silent;
+            } else if (verbosity == "Summary") {
+                cfg.linear_solver_params.verbosity = linalg::Verbosity::Summary;
+            } else if (verbosity == "Verbose") {
+                cfg.linear_solver_params.verbosity = linalg::Verbosity::Verbose;
+            } else {
+                fail(comm, ctx + ": unsupported verbosity type '" + verbosity + "' (available: Silent, Summary, Verbose)");
+            }
+
+            check_positive(cfg.linear_solver_params.relative_tolerance, "rel_tol", ctx, comm);
+            check_positive(cfg.linear_solver_params.absolute_tolerance, "abs_tol", ctx, comm);
+            check_positive(cfg.linear_solver_params.max_iterations, "max_iter", ctx, comm);
         }
     }
 

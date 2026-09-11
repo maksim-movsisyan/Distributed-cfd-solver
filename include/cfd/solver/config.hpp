@@ -12,7 +12,7 @@
 #include <string>
 
 #include "cfd/core/types.hpp"
-#include "cfd/solver/gradient/gradient_manager.hpp"
+#include "cfd/numerics/gradient/gradient_manager.hpp"
 #include "cfd/solver/eos/ideal_gas.hpp"
 #include "cfd/linalg/config.hpp"
 
@@ -109,7 +109,7 @@ struct SolverConfig {
     std::array<double, 3> init_velocity = {0.0, 0.0, 0.0};
 
     // [numerics]
-    gradient::GradientType gradient = gradient::GradientType::GreenGaussFace;
+    numerics::gradient::GradientType gradient = numerics::gradient::GradientType::GreenGaussFace;
     FluxType flux = FluxType::HLLC;
     ReconType reconstruction = ReconType::FirstOrder;
     LimiterType limiter = LimiterType::Venkatakrishnan;

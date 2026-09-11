@@ -9,7 +9,7 @@
 #include "cfd/solver/bc/bc.hpp"
 #include "cfd/solver/bc/bc_fill_gradients.hpp"
 #include "cfd/solver/bc/bc_fill_values.hpp"
-#include "cfd/solver/fields/fields_view.hpp"
+#include "cfd/fields/fields_view.hpp"
 
 namespace cfd::solver::bc {
 

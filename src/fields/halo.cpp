@@ -1,4 +1,4 @@
-#include "cfd/solver/halo.hpp"
+#include "cfd/fields/halo.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -10,7 +10,7 @@
 #include "cfd/core/types.hpp"
 #include "cfd/mpi/log.hpp"
 
-namespace cfd::solver::halo {
+namespace cfd::fields::halo {
 
 namespace {
 

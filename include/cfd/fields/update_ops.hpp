@@ -1,22 +1,11 @@
-// Block-wise owned-field update algebra over per-variable pointer spans.
-//
-// The spans concatenate ALL solvable variables of the equation system (the five
-// mean-flow components today; physics-module variables such as turbulence
-// transport quantities are appended by future modules). Time integrators thus
-// stay agnostic to the system size: one code path advances every variable.
-//
-// Performance note: these loops are DRAM-bandwidth-bound. One pointer load per
-// contiguous n_owned-long stream adds no measurable cost versus hand-unrolled
-// per-variable loops — this is the deliberate boundary of generality
-// (orchestration is generic, spatial kernels stay compile-time specialized).
 #pragma once
 
 #include <cstddef>
 #include <span>
 
-#include "cfd/core/types.hpp" // CFD_RESTRICT
+#include "cfd/core/types.hpp"
 
-namespace cfd::solver::fields {
+namespace cfd::fields {
 
 /**
  * @brief dst[v][c] = x[v][c] for every variable v, owned cells c.
@@ -73,4 +62,4 @@ inline void block_ssp_combine(std::span<double* const> dst,
     }
 }
 
-} // namespace cfd::solver::fields
+} // namespace cfd::fields

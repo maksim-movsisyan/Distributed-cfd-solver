@@ -11,7 +11,7 @@
 
 #include "cfd/io/toml/toml_utilities.hpp"
 #include "cfd/mpi/log.hpp"
-#include "cfd/solver/gradient/gradient_manager.hpp"
+#include "cfd/numerics/gradient/gradient_manager.hpp"
 
 using namespace cfd::io::toml_utils;
 
@@ -138,13 +138,13 @@ SolverConfig parse_solver_config(const std::string& path, const MPI_Comm comm) {
 
         const std::string gradient_type = opt_string(*t, "gradient", "GREEN_GAUSS_FACE");
         if (gradient_type == "GREEN_GAUSS_FACE") {
-            cfg.gradient = gradient::GradientType::GreenGaussFace;
+            cfg.gradient = numerics::gradient::GradientType::GreenGaussFace;
         } else if (gradient_type == "GREEN_GAUSS_CELL") {
-            cfg.gradient = gradient::GradientType::GreenGaussCell;
+            cfg.gradient = numerics::gradient::GradientType::GreenGaussCell;
         } else if (gradient_type == "LEAST_SQUARES_FACE") {
-            cfg.gradient = gradient::GradientType::LeastSquaresCellNode;
+            cfg.gradient = numerics::gradient::GradientType::LeastSquaresCellNode;
         } else if (gradient_type == "LEAST_SQUARES_NODE") {
-            cfg.gradient = gradient::GradientType::LeastSquaresCellNode;
+            cfg.gradient = numerics::gradient::GradientType::LeastSquaresCellNode;
         } else {
             fail(comm, ctx + ": unsupported gradient '" + gradient_type +
                            "' (available: GREEN_GAUSS_FACE, GREEN_GAUSS_CELL, LEAST_SQUARES_FACE, LEAST_SQUARES_NODE)");

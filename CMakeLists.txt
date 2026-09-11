@@ -316,10 +316,10 @@ add_library(
     STATIC
         src/solver/bc/config.cpp
         src/solver/config.cpp
-        src/solver/halo.cpp
+        src/fields/halo.cpp
         src/solver/solver.cpp
-        src/solver/gradient/gradient_operator.cpp
-        src/solver/gradient/gradient_manager.cpp
+        src/numerics/gradient/gradient_operator.cpp
+        src/numerics/gradient/gradient_manager.cpp
 )
 
 target_include_directories(

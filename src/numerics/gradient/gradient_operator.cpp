@@ -1,4 +1,4 @@
-#include "cfd/solver/gradient/gradient_operator.hpp"
+#include "cfd/numerics/gradient/gradient_operator.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -12,7 +12,7 @@
 
 
 
-namespace cfd::solver::gradient {
+namespace cfd::numerics::gradient {
 
 namespace {
 
@@ -789,4 +789,4 @@ void LeastSquaresCellNodeGradient::apply_set(std::span<const double*> s,
         }
     }
 }
-} // namespace cfd::solver::gradient
+} // namespace cfd::numerics::gradient

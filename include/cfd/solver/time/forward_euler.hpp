@@ -3,7 +3,7 @@
 //   u^{n+1} = u^n - alpha * R(u^n),   alpha = cfl / lambda
 #pragma once
 
-#include "cfd/solver/fields/update_ops.hpp"
+#include "cfd/fields/update_ops.hpp"
 #include "cfd/mesh/aux_connectivity.hpp"
 #include "cfd/mesh/aux_geometry.hpp"
 

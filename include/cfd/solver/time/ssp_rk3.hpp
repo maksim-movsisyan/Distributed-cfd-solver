@@ -5,7 +5,7 @@
 //   Stage 3: u^{n+1}   = 1/3 u^n + 2/3 (u(2) - alpha * R(u(2))
 #pragma once
 
-#include "cfd/solver/fields/update_ops.hpp"
+#include "cfd/fields/update_ops.hpp"
 #include "cfd/mesh/aux_connectivity.hpp"
 #include "cfd/mesh/aux_geometry.hpp"
 

@@ -26,10 +26,10 @@
 #include "cfd/mesh/aux_geometry.hpp"
 #include "cfd/solver/bc/config.hpp"
 #include "cfd/solver/eos/eos_concept.hpp"
-#include "cfd/solver/fields/fields_manager.hpp"
-#include "cfd/solver/fields/fields_view.hpp"
-#include "cfd/solver/gradient/gradient_manager.hpp"
-#include "cfd/solver/halo.hpp"
+#include "cfd/fields/fields_manager.hpp"
+#include "cfd/fields/fields_view.hpp"
+#include "cfd/numerics/gradient/gradient_manager.hpp"
+#include "cfd/fields/halo.hpp"
 #include "cfd/solver/physics/physics_concepts.hpp"
 #include "cfd/solver/physics/inviscid_flow.hpp"
 #include "cfd/solver/physics/viscous_flow.hpp"
@@ -102,7 +102,7 @@ public:
         }, modules);
     }
 
-    void register_halo(halo::HaloExchanger& halo, fields::FieldsManager& mgr) {
+    void register_halo(fields::halo::HaloExchanger& halo, fields::FieldsManager& mgr) {
         std::apply([&](auto&... m) {
             (m.register_halo(halo, mgr), ...);
         }, modules);
@@ -126,7 +126,7 @@ public:
                     const mesh::MeshAuxGeometry& aux_geom,
                     const bc::BoundaryConfig& bcfg,
                     const EOS& eos,
-                    halo::HaloExchanger& halo,
+                    fields::halo::HaloExchanger& halo,
                     const MPI_Comm comm) {
         std::apply([&](auto&... m) {
             (m.template initialize<EOS>(mesh, aux_conn, aux_geom, bcfg, eos, halo, comm), ...);
@@ -146,7 +146,7 @@ public:
         }, modules);
     }
 
-    void compute_gradients(const gradient::GradientManager& gm,
+    void compute_gradients(const numerics::gradient::GradientManager& gm,
                            const mesh::MeshPart& mesh) const {
         std::apply([&](const auto&... m) {
             (m.compute_gradients(gm, mesh), ...);

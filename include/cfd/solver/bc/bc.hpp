@@ -1,7 +1,7 @@
 #pragma once
 
 #include "cfd/core/types.hpp"
-#include "cfd/solver/fields/fields_view.hpp"
+#include "cfd/fields/fields_view.hpp"
 #include "cfd/solver/eos/eos_concept.hpp"
 #include "cfd/mesh/localmesh.hpp"
 #include <string>

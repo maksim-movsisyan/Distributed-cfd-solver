@@ -18,7 +18,7 @@
 #include "cfd/solver/fluxes/viscous.hpp"
 #include "cfd/solver/eos/eos_concept.hpp"
 #include "cfd/solver/eos/state_conversions.hpp"
-#include "cfd/solver/fields/fields_view.hpp"
+#include "cfd/fields/fields_view.hpp"
 #include "cfd/solver/physics/physics_concepts.hpp"
 #include "cfd/solver/reconstruction/reconstruction.hpp"
 

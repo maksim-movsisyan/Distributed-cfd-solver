@@ -1,8 +1,8 @@
-#include "cfd/solver/gradient/gradient_manager.hpp"
+#include "cfd/numerics/gradient/gradient_manager.hpp"
 
 #include <cassert>
 
-namespace cfd::solver::gradient {
+namespace cfd::numerics::gradient {
 
 void GradientManager::register_all() {
     registry_[GradientType::GreenGaussCell] = []() -> GOPtr {
@@ -44,4 +44,4 @@ void GradientManager::apply_gradient_set(std::span<const double*> s, std::span<d
     grad_->apply_set(s, g, stride, mesh, aux_conn);
 }
 
-} // namespace cfd::solver::gradient
+} // namespace cfd::numerics::gradient

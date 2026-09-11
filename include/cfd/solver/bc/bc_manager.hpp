@@ -23,7 +23,7 @@
 #include "cfd/solver/bc/subsonic_outlet.hpp"
 #include "cfd/solver/bc/config.hpp"
 #include "cfd/solver/eos/eos_concept.hpp"
-#include "cfd/solver/fields/fields_view.hpp"
+#include "cfd/fields/fields_view.hpp"
 
 namespace cfd::solver::bc {
 /**

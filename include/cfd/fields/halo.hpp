@@ -8,7 +8,7 @@
 
 #include "cfd/mesh/localmesh.hpp"
 
-namespace cfd::solver::halo {
+namespace cfd::fields::halo {
 
 /**
  * @class HaloExchanger
@@ -88,4 +88,4 @@ private:
     PhaseData grads_phase_;
 };
 
-} // namespace cfd::solver::halo
+} // namespace cfd::fields::halo

@@ -34,10 +34,10 @@
 #include "cfd/solver/config.hpp"
 #include "cfd/solver/eos/eos_concept.hpp"
 #include "cfd/solver/eos/state_conversions.hpp"
-#include "cfd/solver/fields/fields_manager.hpp"
-#include "cfd/solver/fields/fields_view.hpp"
-#include "cfd/solver/gradient/gradient_manager.hpp"
-#include "cfd/solver/halo.hpp"
+#include "cfd/fields/fields_manager.hpp"
+#include "cfd/fields/fields_view.hpp"
+#include "cfd/numerics/gradient/gradient_manager.hpp"
+#include "cfd/fields/halo.hpp"
 #include "cfd/solver/physics/physics_concepts.hpp"
 #include "cfd/solver/reconstruction/reconstruction.hpp"
 #include "cfd/solver/residual_kernel.hpp"
@@ -910,14 +910,14 @@ private:
     ResidualKernel<EOS, FluxPolicy, ReconPolicy, PhysPolicy> residual_kernel_;
     JacobianKernel<EOS, FluxPolicy, PhysPolicy> jacobian_kernel_;
     bc::BoundaryManager<EOS> bcs_;
-    halo::HaloExchanger halo_;
+    fields::halo::HaloExchanger halo_;
 
 
 
     TimePolicy time_{};
     MPI_Comm comm_{MPI_COMM_WORLD};
 
-    gradient::GradientManager grad_mgr_;
+    numerics::gradient::GradientManager grad_mgr_;
     std::size_t grad_stride_{0};
 
     fields::FieldsManager mgr_;

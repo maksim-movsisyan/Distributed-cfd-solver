@@ -7,9 +7,9 @@
 
 #include "cfd/mesh/localmesh.hpp"
 #include "cfd/mesh/aux_connectivity.hpp"
-#include "cfd/solver/gradient/gradient_operator.hpp"
+#include "cfd/numerics/gradient/gradient_operator.hpp"
 
-namespace cfd::solver::gradient {
+namespace cfd::numerics::gradient {
 
 enum class GradientType {
     GreenGaussFace,
@@ -50,4 +50,4 @@ private:
     void register_all();
 };
 
-} // namespace cfd::solver::gradient
+} // namespace cfd::numerics::gradient

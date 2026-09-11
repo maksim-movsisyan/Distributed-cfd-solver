@@ -8,7 +8,7 @@
 #include "cfd/mesh/localmesh.hpp"
 #include "cfd/mesh/aux_connectivity.hpp"
 
-namespace cfd::solver::gradient {
+namespace cfd::numerics::gradient {
 
 /**
  * @class GradientOperator
@@ -111,4 +111,4 @@ private:
     std::size_t m_coeffs_off_ = 0; // Stride = total_node_connections
 };
 
-} // namespace cfd::solver::gradient
+} // namespace cfd::numerics::gradient

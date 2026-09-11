@@ -8,7 +8,7 @@
 #include "cfd/mesh/localmesh.hpp"
 #include "cfd/mesh/aux_geometry.hpp"
 #include "cfd/mesh/aux_connectivity.hpp"
-#include "cfd/solver/fields/fields_view.hpp"
+#include "cfd/fields/fields_view.hpp"
 #include "cfd/solver/limiter/limiters.hpp"
 #include "cfd/solver/reconstruction/reconstruction.hpp"
 

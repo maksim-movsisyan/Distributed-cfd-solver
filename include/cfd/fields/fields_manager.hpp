@@ -8,7 +8,7 @@
 #include <string>
 #include <cstddef>
 
-namespace cfd::solver::fields {
+namespace cfd::fields {
 /**
  * @class FieldLocation
  * @brief Specifies where the field data is centered.
@@ -192,4 +192,4 @@ public:
     }
 };
 
-} // namespace cfd
+} // namespace cfd::fields

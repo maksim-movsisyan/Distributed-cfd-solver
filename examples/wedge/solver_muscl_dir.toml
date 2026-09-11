@@ -22,6 +22,7 @@ venkat_k = 0.5
 gradient = "GREEN_GAUSS_FACE"
 
 [time]
+mode = "Steady"
 scheme = "FORWARD_EULER"
 cfl = 0.5
 max_iterations = 5000

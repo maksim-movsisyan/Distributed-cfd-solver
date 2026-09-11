@@ -192,7 +192,7 @@ SolverConfig parse_solver_config(const std::string& path, const MPI_Comm comm) {
         const toml::table* t = req_table(root, "time", path, comm);
         const std::string ctx = path + " [time]";
         check_allowed_keys(
-            *t, {"scheme", "cfl", "max_iterations", "residual_tolerance"},
+            *t, {"scheme", "cfl", "max_iterations", "residual_tolerance", "mode", "time_step", "max_time_steps", "bdf_order"},
             ctx, comm);
         const std::string scheme = req_string(*t, "scheme", ctx, comm);
         if (scheme == "FORWARD_EULER") {
@@ -213,6 +213,16 @@ SolverConfig parse_solver_config(const std::string& path, const MPI_Comm comm) {
         }
         cfg.residual_tolerance = req_number(*t, "residual_tolerance", ctx, comm);
         check_positive(cfg.residual_tolerance, "residual_tolerance", ctx, comm);
+
+        const std::string time_mode = req_string(*t, "mode", ctx, comm);
+        if (time_mode == "Steady") {
+            cfg.time_mode = TimeMode::Steady;
+        } else if (time_mode == "DualTime") {
+            cfg.time_mode = TimeMode::DualTime;
+            cfg.dt = req_number(*t, "time_step", ctx, comm);
+            cfg.max_time_steps = req_integer(*t, "max_time_steps", ctx, comm);
+            cfg.bdf_order = opt_integer(*t, "bdf_order", 2);
+        }
     }
 
     { // [output]

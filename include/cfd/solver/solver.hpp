@@ -43,11 +43,12 @@
 #include "cfd/solver/residual_kernel.hpp"
 #include "cfd/solver/jacobian_kernel.hpp"
 #include "cfd/solver/time/time_policy.hpp"
+#include "cfd/solver/time/time_mode.hpp"
 
 namespace cfd::solver {
 
 template <eos::EquationOfState EOS, typename FluxPolicy, recon::ReconstructionPolicy ReconPolicy,
-          physics::PhysicsGeneral PhysPolicy, template <typename> class TimePolicyT>
+          physics::PhysicsGeneral PhysPolicy, template <typename> class TimePolicyT, typename TimeMode = time::SteadyMode>
 class Solver {
 public:
     // Concrete time policy bound to this solver instantiation. The injected
@@ -158,73 +159,11 @@ public:
                       "time policy must satisfy the time::TimeIntegrationPolicy concept");
 
         init_fields();
-        const double wall0 = MPI_Wtime();
-
-        std::array<double, PhysPolicy::kNumVars> norm0{};
-        bool have_norm0 = false;
-        long long last_iter = 0;
-
-        mpi::log_info("solver: physics=%s flux=%s recon=%s limiter=%s scheme=%s cfl=%.3f max_iter=%lld",
-                      PhysPolicy::full_name().c_str(), FluxPolicy::name(), ReconPolicy::name(),
-                      ReconPolicy::limiter_name(),
-                      TimePolicy::name(),
-                      cfg_.cfl, static_cast<long long>(cfg_.max_iterations));
-
-        for (long long iter = 1; iter <= cfg_.max_iterations; ++iter) {
-            last_iter = iter;
-
-            // --- One full time step (all update blocks) ---
-            time_.advance(*this);
-
-            // --- Diagnostics & convergence ---
-            // The global L2 reduction runs only every residual_interval
-            // iterations (plus the first and the last): per-iteration
-            // collectives would cap strong scaling at high rank counts.
-            const bool diagnose = iter == 1
-                               || iter % cfg_.residual_interval == 0
-                               || iter == cfg_.max_iterations;
-
-            bool converged = false;
-            double rel = 1.0;
-            if (diagnose) {
-                std::array<double, PhysPolicy::kNumVars> l2{};
-                residual_norms(l2);
-
-                if (!std::isfinite(l2[0])) {
-                    mpi::log_warn_rank("solver: non-finite residual detected, dumping state");
-                    write_fields("blowup");
-                    return 1;
-                }
-
-                if (!have_norm0) {
-                    norm0 = l2;
-                    have_norm0 = true;
-                } else {
-                    rel = relative_residual(l2, norm0);
-                }
-
-                log_progress(iter, MPI_Wtime() - wall0, l2, rel);
-                if (g_verbose >= 1) {
-                    log_boundary_integrals();
-                }
-
-                converged = rel <= cfg_.residual_tolerance;
-            }
-
-            if (cfg_.field_interval > 0 && iter % cfg_.field_interval == 0) {
-                write_fields(make_stem("iter", iter));
-            }
-
-            if (converged) {
-                mpi::log_info("solver: converged at iteration %lld (rel=%.3e)", iter, rel);
-                break;
-            }
+        if constexpr (TimeMode::kIsUnsteady) {
+            return run_dual_time();
+        } else {
+            return run_steady();
         }
-
-        write_fields(make_stem("final", last_iter));
-        mpi::log_info("solver: done in %lld iterations, wall time %.3f s",
-                      last_iter, MPI_Wtime() - wall0);
-        return 0;
     }
 
     // --- Residual Operator interface (consumed by TimePolicy) ----------------
@@ -295,6 +234,11 @@ public:
         if constexpr (kHasModules) {
             phys_.cell_sources(eos_, mesh_, grad_view_.as_const());
         }
+
+        // 9. For unsteady problems: add time terms to residual
+        if constexpr (TimeMode::kIsUnsteady) {
+            add_unsteady_source_term(state);
+        }
     }
 
     void assemble_jacobian(const LocalIndex* CFD_RESTRICT row_ptr,
@@ -315,10 +259,16 @@ public:
             //Implicit: alpha = Volume / dt = lambda / CFL
             const double inv_cfl = 1.0 / cfg_.cfl;
             
+            double unsteady_diag_coeff = 0.0;
+            if constexpr (TimeMode::kIsUnsteady) {
+                const double c0 = (bdf_order_cur_ == 2) ? 1.5 : 1.0;
+                unsteady_diag_coeff = c0 / cfg_.dt;
+            }
+            
             for (std::size_t c = 0; c < n_own; ++c) {
                 const double l = std::max(lam[c], constants::kSpectralRadiusFloor);
                 dt[c]    = cfg_.cfl * vol[c] / l;
-                alpha[c] = l * inv_cfl;
+                alpha[c] = (l * inv_cfl) + (vol[c] * unsteady_diag_coeff);                  // take into account unstedy terms in jacobian
             }
         } else {
             // Explicit: alpha = dt / Volume = CFL / lambda  
@@ -414,6 +364,24 @@ private:
         mgr_.add_field<double>("stage_rhov", n_total, fields::FieldLocation::Cell);
         mgr_.add_field<double>("stage_rhow", n_total, fields::FieldLocation::Cell);
         mgr_.add_field<double>("stage_rhoE", n_total, fields::FieldLocation::Cell);
+
+        if constexpr (TimeMode::kIsUnsteady) {
+            // values at previous physical time step
+            mgr_.add_field<double>("phys_un_rho",  n_total, fields::FieldLocation::Cell);
+            mgr_.add_field<double>("phys_un_rhou", n_total, fields::FieldLocation::Cell);
+            mgr_.add_field<double>("phys_un_rhov", n_total, fields::FieldLocation::Cell);
+            mgr_.add_field<double>("phys_un_rhow", n_total, fields::FieldLocation::Cell);
+            mgr_.add_field<double>("phys_un_rhoE", n_total, fields::FieldLocation::Cell);
+
+            if constexpr (TimeMode::kBdfOrder == 2) {
+                // values at pre-previous physical time step
+                mgr_.add_field<double>("phys_unm1_rho",  n_total, fields::FieldLocation::Cell);
+                mgr_.add_field<double>("phys_unm1_rhou", n_total, fields::FieldLocation::Cell);
+                mgr_.add_field<double>("phys_unm1_rhov", n_total, fields::FieldLocation::Cell);
+                mgr_.add_field<double>("phys_unm1_rhow", n_total, fields::FieldLocation::Cell);
+                mgr_.add_field<double>("phys_unm1_rhoE", n_total, fields::FieldLocation::Cell);
+            }
+        }
     }
 
     void bind_views() {
@@ -493,6 +461,28 @@ private:
                 mgr_.get_required_field_ptr<double>("phi_tmp")
             };
         }
+
+        if constexpr (TimeMode::kIsUnsteady) {
+            // values at previous physical time step
+            phys_un_slots_ = {
+                mgr_.get_required_field_ptr<double>("phys_un_rho"),
+                mgr_.get_required_field_ptr<double>("phys_un_rhou"),
+                mgr_.get_required_field_ptr<double>("phys_un_rhov"),
+                mgr_.get_required_field_ptr<double>("phys_un_rhow"),
+                mgr_.get_required_field_ptr<double>("phys_un_rhoE")
+            };
+
+            if constexpr (TimeMode::kBdfOrder == 2) {
+                // values at pre-previous physical time step
+                phys_unm1_slots_ = {
+                    mgr_.get_required_field_ptr<double>("phys_unm1_rho"),
+                    mgr_.get_required_field_ptr<double>("phys_unm1_rhou"),
+                    mgr_.get_required_field_ptr<double>("phys_unm1_rhov"),
+                    mgr_.get_required_field_ptr<double>("phys_unm1_rhow"),
+                    mgr_.get_required_field_ptr<double>("phys_unm1_rhoE")
+                };
+            }
+        }
     }
 
     /** @brief Conservative view of the current primary state (5 mean-flow vars). */
@@ -538,11 +528,227 @@ private:
             u.rhov[c] = U[2];
             u.rhow[c] = U[3];
             u.rhoE[c] = U[4];
+
+            if constexpr (TimeMode::kIsUnsteady) {
+                phys_un_slots_[0][c] = U[0];
+                phys_un_slots_[1][c] = U[1];
+                phys_un_slots_[2][c] = U[2];
+                phys_un_slots_[3][c] = U[3];
+                phys_un_slots_[4][c] = U[4];
+                if constexpr (TimeMode::kBdfOrder == 2) {
+                    phys_unm1_slots_[0][c] = U[0];
+                    phys_unm1_slots_[1][c] = U[1];
+                    phys_unm1_slots_[2][c] = U[2];
+                    phys_unm1_slots_[3][c] = U[3];
+                    phys_unm1_slots_[4][c] = U[4];
+                }
+            }
         }
 
         if constexpr (kHasModules) {
             phys_.init_state(mgr_);
         }
+    }
+
+    void add_unsteady_source_term(const std::span<double* const> state) noexcept {
+        const std::size_t n_own = static_cast<std::size_t>(mesh_.n_own);
+        const double* CFD_RESTRICT vol = mesh_.cell_volume.data();
+        const double inv_dt = 1.0 / cfg_.dt;
+
+        if (bdf_order_cur_ == 2) {
+            const double c0 = 1.5 * inv_dt;
+            const double c1 = -2.0 * inv_dt;
+            const double c2 = 0.5 * inv_dt;
+
+            for (std::size_t v = 0; v < PhysPolicy::kNumVars; ++v) {
+                const double* CFD_RESTRICT u_cur = state[v];
+                const double* CFD_RESTRICT u_n   = phys_un_slots_[v];
+                const double* CFD_RESTRICT u_nm1 = phys_unm1_slots_[v];
+                double* CFD_RESTRICT res         = res_slots_[v];
+
+                for (std::size_t c = 0; c < n_own; ++c) {
+                    res[c] += vol[c] * (c0 * u_cur[c] + c1 * u_n[c] + c2 * u_nm1[c]);
+                }
+            }
+        } else {
+            const double c0 = 1.0 * inv_dt;
+            const double c1 = -1.0 * inv_dt;
+
+            for (std::size_t v = 0; v < PhysPolicy::kNumVars; ++v) {
+                const double* CFD_RESTRICT u_cur = state[v];
+                const double* CFD_RESTRICT u_n   = phys_un_slots_[v];
+                double* CFD_RESTRICT res         = res_slots_[v];
+
+                for (std::size_t c = 0; c < n_own; ++c) {
+                    res[c] += vol[c] * (c0 * u_cur[c] + c1 * u_n[c]);
+                }
+            }
+        }
+    }
+
+    void shift_physical_time_levels() noexcept {
+        if constexpr (TimeMode::kIsUnsteady) {
+            const std::size_t n_own = static_cast<std::size_t>(mesh_.n_own); 
+            const std::size_t n_vars = PhysPolicy::kNumVars;
+
+            if constexpr (TimeMode::kBdfOrder == 2) {
+                std::swap(phys_unm1_slots_, phys_un_slots_);
+            }
+
+            for (std::size_t v = 0; v < n_vars; ++v) {
+                std::copy_n(u_slots_[v], n_own, phys_un_slots_[v]); 
+            }
+        }
+    }
+
+    int run_steady() {
+        const double wall0 = MPI_Wtime();
+
+        std::array<double, PhysPolicy::kNumVars> norm0{};
+        bool have_norm0 = false;
+        long long last_iter = 0;
+
+        mpi::log_info("solver: physics=%s flux=%s recon=%s limiter=%s scheme=%s cfl=%.3f max_iter=%lld",
+                      PhysPolicy::full_name().c_str(), FluxPolicy::name(), ReconPolicy::name(),
+                      ReconPolicy::limiter_name(),
+                      TimePolicy::name(),
+                      cfg_.cfl, static_cast<long long>(cfg_.max_iterations));
+
+        for (long long iter = 1; iter <= cfg_.max_iterations; ++iter) {
+            last_iter = iter;
+
+            // --- One full time step (all update blocks) ---
+            time_.advance(*this);
+
+            // --- Diagnostics & convergence ---
+            // The global L2 reduction runs only every residual_interval
+            // iterations (plus the first and the last): per-iteration
+            // collectives would cap strong scaling at high rank counts.
+            const bool diagnose = iter == 1
+                               || iter % cfg_.residual_interval == 0
+                               || iter == cfg_.max_iterations;
+
+            bool converged = false;
+            double rel = 1.0;
+            if (diagnose) {
+                std::array<double, PhysPolicy::kNumVars> l2{};
+                residual_norms(l2);
+
+                if (!std::isfinite(l2[0])) {
+                    mpi::log_warn_rank("solver: non-finite residual detected, dumping state");
+                    write_fields("blowup");
+                    return 1;
+                }
+
+                if (!have_norm0) {
+                    norm0 = l2;
+                    have_norm0 = true;
+                } else {
+                    rel = relative_residual(l2, norm0);
+                }
+
+                log_progress(iter, MPI_Wtime() - wall0, l2, rel);
+                if (g_verbose >= 1) {
+                    log_boundary_integrals();
+                }
+
+                converged = rel <= cfg_.residual_tolerance;
+            }
+
+            if (cfg_.field_interval > 0 && iter % cfg_.field_interval == 0) {
+                write_fields(make_stem("iter", iter));
+            }
+
+            if (converged) {
+                mpi::log_info("solver: converged at iteration %lld (rel=%.3e)", iter, rel);
+                break;
+            }
+        }
+
+        write_fields(make_stem("final", last_iter));
+        mpi::log_info("solver: done in %lld iterations, wall time %.3f s",
+                      last_iter, MPI_Wtime() - wall0);
+        return 0;
+    }
+
+    int run_dual_time() {
+        const double wall0 = MPI_Wtime();
+        mpi::log_info("solver (unsteady): physics=%s flux=%s recon=%s limiter=%s scheme=%s dt=%.3e total_steps=%lld max_subiter=%lld",
+                    PhysPolicy::full_name().c_str(), FluxPolicy::name(), ReconPolicy::name(),
+                    ReconPolicy::limiter_name(),
+                    TimePolicy::name(),
+                    cfg_.dt, static_cast<long long>(cfg_.max_time_steps),
+                    static_cast<long long>(cfg_.max_iterations));
+        
+        double t_phys = 0.0;
+
+        for (std::int64_t phys_step = 1; phys_step <= cfg_.max_time_steps; ++phys_step) {
+            t_phys += cfg_.dt;
+            bdf_order_cur_ = (phys_step == 1 || TimeMode::kBdfOrder == 1) ? 1 : 2;
+
+            std::array<double, PhysPolicy::kNumVars> norm0{};
+            bool sub_converged = false;
+            bool have_norm0 = false;
+            std::int64_t last_subiter = 0;
+            
+            for (std::int64_t subiter = 1; subiter <= cfg_.max_iterations; ++subiter) {
+                last_subiter = subiter;
+                time_.advance(*this);
+                
+                // --- Diagnostics & convergence ---
+                // The global L2 reduction runs only every 10
+                // iterations (plus the first and the last): per-iteration
+                // collectives would cap strong scaling at high rank counts.
+                const bool diagnose = subiter == 1
+                                    || subiter % 5 == 0
+                                    || subiter == cfg_.max_iterations;
+
+                bool converged = false;
+                double rel = 1.0;
+                if (diagnose) {
+                    std::array<double, PhysPolicy::kNumVars> l2{};
+                    residual_norms(l2);
+
+                    if (!std::isfinite(l2[0])) {
+                        mpi::log_warn_rank("solver: non-finite residual detected, dumping state");
+                        write_fields("blowup");
+                        return 1;
+                    }
+
+                    if (!have_norm0) {
+                        norm0 = l2;
+                        have_norm0 = true;
+                    } else {
+                        rel = relative_residual(l2, norm0);
+                    }
+
+                    converged = rel <= cfg_.residual_tolerance;
+                }
+
+                if (converged) {
+                    sub_converged = true;
+                    break;
+                }
+            }
+
+            // U^{n-1} = U^n, U^n = U^{n+1}
+            shift_physical_time_levels();
+
+            if (cfg_.field_interval > 0 && phys_step % cfg_.field_interval == 0) {
+                write_fields(make_stem("unsteady", phys_step));
+            }
+
+            mpi::log_info("Time step %lld/%lld: t = %.5e s | subiters: %lld/%lld (%s)", 
+                      static_cast<long long>(phys_step), static_cast<long long>(cfg_.max_time_steps),
+                      t_phys, 
+                      static_cast<long long>(last_subiter), static_cast<long long>(cfg_.max_iterations),
+                      sub_converged ? "converged" : "limit reached");
+        }
+
+        write_fields(make_stem("final", cfg_.max_time_steps));
+        mpi::log_info("solver: unsteady calculation finished in %lld steps, wall time %.3f s",
+                    static_cast<long long>(cfg_.max_time_steps), MPI_Wtime() - wall0);
+        return 0;
     }
 
     // --- Diagnostics & VTU Output -------------------------------------------
@@ -724,9 +930,12 @@ private:
     std::vector<const double*> q_slots_;
     std::vector<double*> grad_slots_;
     std::vector<double*> u_slots_;
+    std::vector<double*> phys_un_slots_, phys_unm1_slots_;
+    std::size_t bdf_order_cur_ = 1;
     std::vector<double*> prev_slots_;
     std::vector<double*> stage_slots_;
     std::vector<double*> res_slots_;
+
 
     std::vector<double> lam_;   ///< Per-cell spectral radius [0, n_cells)
     std::vector<double> dt_;    ///< Local time step [0, n_own)

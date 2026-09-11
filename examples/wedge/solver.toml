@@ -20,6 +20,7 @@ flux = "HLLC"
 reconstruction = "FIRST_ORDER"
 
 [time]
+mode = "Steady"
 scheme = "FORWARD_EULER"
 cfl = 2.0
 max_iterations = 1000

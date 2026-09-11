@@ -172,10 +172,14 @@ Governs time-stepping schemes, CFL condition, and stopping criteria.
 
 | Key | Type | Allowed Values | Description |
 |---|---|---|---|
+| `mode` | String | `"Steady"`, `"DualTime"` | Time mode scheme (Steady/Unsteady). |
 | `scheme` | String | `"FORWARD_EULER"`, `"SSP_RK3"`, `"BACKWARD_EULER"` | Time integration scheme (1st-order Euler or 3-stage TVD Runge-Kutta, Implicit Euler). |
 | `cfl` | Float | $> 0.0$ (e.g. `0.5` – `1.2`) | Courant-Friedrichs-Lewy (CFL) number. |
 | `max_iterations` | Integer | $\ge 1$ | Maximum number of time iterations to execute. |
 | `residual_tolerance` | Float | $> 0.0$ (e.g. `1e-6`) | Relative $L_2$ residual tolerance for convergence termination. |
+| `time_step` | Float | $> 0.0$ (e.g. `1e-6`) | Requaired for unsteady - physical time step. |
+| `max_time_steps` | Integer | $> 0.0$ (e.g. `1`) | Requaired for unsteady - number of physical time steps. |
+| `bdf_order` | Integer | $> 0.0$ (e.g. `1/2`) | Requaired for unsteady - order for time derivatives. |
 
 ---
 
@@ -226,6 +230,7 @@ venkat_k = 0.5
 gradient = "LEAST_SQUARES_FACE"
 
 [time]
+mode = "Steady"
 scheme = "BACKWARD_EULER"
 cfl = 25.0
 max_iterations = 500

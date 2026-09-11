@@ -23,6 +23,7 @@ venkat_k = 0.5
 gradient = "LEAST_SQUARES_FACE"
 
 [time]
+mode = "Steady"
 scheme = "BACKWARD_EULER"
 cfl = 25.0
 max_iterations = 500

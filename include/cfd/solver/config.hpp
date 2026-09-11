@@ -60,6 +60,11 @@ enum class TimeScheme {
     BackwardEuler,
 };
 
+enum class TimeMode {
+    Steady,
+    DualTime
+};
+
 enum class ReconType {
     FirstOrder,
     Muscl,
@@ -119,9 +124,13 @@ struct SolverConfig {
     double cfl = 0.4;
     std::int64_t max_iterations = 10000;
     double residual_tolerance = 1.0e-10; // relative L2 drop
-    // [time], implicit schemes: linear solver budget per step
-    double implicit_tolerance = 1.0e-4;   // BiCGSTAB relative residual per step
-    std::int64_t implicit_max_iterations = 100; // BiCGSTAB iteration cap
+    TimeMode time_mode = TimeMode::Steady;
+    //for unsteady time mode:
+    double dt = 1e-6;
+    std::int64_t max_time_steps = 1;
+    std::int64_t bdf_order = 2;
+
+    
 
     // [linalg]
     linalg::SolverParams linear_solver_params;

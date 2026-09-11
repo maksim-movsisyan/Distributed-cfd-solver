@@ -13,12 +13,13 @@
 #include "cfd/solver/time/forward_euler.hpp"
 #include "cfd/solver/time/ssp_rk3.hpp"
 #include "cfd/solver/time/implicit_euler.hpp"
+#include "cfd/solver/time/time_mode.hpp"
 //#include "cfd/solver/turbulence/spalart_allmaras.hpp"
 
 namespace cfd::solver {
 
 // dispatch time integration scheme
-template <typename EosType, typename FluxType, typename ReconType, typename PhysType>
+template <typename EosType, typename FluxType, typename ReconType, typename PhysType, typename TimeModeType>
 int dispatch_time_scheme(const SolverConfig& cfg,
                          const bc::BoundaryConfig& bcfg,
                          const mesh::MeshPart& mp,
@@ -27,19 +28,53 @@ int dispatch_time_scheme(const SolverConfig& cfg,
                          const PhysType& phys) {
     switch (cfg.scheme) {
         case TimeScheme::ForwardEuler:
-            return Solver<EosType, FluxType, ReconType, PhysType, time::ForwardEuler>(
+            return Solver<EosType, FluxType, ReconType, PhysType, time::ForwardEuler, TimeModeType>(
                 cfg, bcfg, eos, phys, mp, comm).run();
 
         case TimeScheme::SspRk3:
-            return Solver<EosType, FluxType, ReconType, PhysType, time::SspRk3>(
+            return Solver<EosType, FluxType, ReconType, PhysType, time::SspRk3, TimeModeType>(
                 cfg, bcfg, eos, phys, mp, comm).run();
 
         case TimeScheme::BackwardEuler:
-            return Solver<EosType, FluxType, ReconType, PhysType, time::BackwardEuler>(
+            return Solver<EosType, FluxType, ReconType, PhysType, time::BackwardEuler, TimeModeType>(
                 cfg, bcfg, eos, phys, mp, comm).run();
 
         default:
             mpi::fatal(comm, "dispatch: unknown time scheme");
+            return 1;
+    }
+}
+
+// dispatch time mode 
+template <typename EosType, typename FluxType, typename ReconType, typename PhysType>
+int dispatch_time_mode(const SolverConfig& cfg,
+                       const bc::BoundaryConfig& bcfg,
+                       const mesh::MeshPart& mp,
+                       const MPI_Comm comm,
+                       const EosType& eos,
+                       const PhysType& phys) {
+
+    switch (cfg.time_mode) {
+        case TimeMode::Steady:
+            return dispatch_time_scheme<EosType, FluxType, ReconType, PhysType, time::SteadyMode>(
+                cfg, bcfg, mp, comm, eos, phys);
+
+        case TimeMode::DualTime:  
+            if (cfg.bdf_order == 2) {
+                using Mode = time::DualTimeMode<2>;
+                return dispatch_time_scheme<EosType, FluxType, ReconType, PhysType, Mode>(
+                    cfg, bcfg, mp, comm, eos, phys);
+            } else if (cfg.bdf_order == 1) {
+                using Mode = time::DualTimeMode<1>;
+                return dispatch_time_scheme<EosType, FluxType, ReconType, PhysType, Mode>(
+                    cfg, bcfg, mp, comm, eos, phys);
+            } else {
+                mpi::fatal(comm, "dispatch: invalid bdf_order (available: 1, 2)");
+                return 1;
+            }
+
+        default:
+            mpi::fatal(comm, "dispatch: unknown time mode");
             return 1;
     }
 }
@@ -55,17 +90,17 @@ int dispatch_multidim_limiter(const SolverConfig& cfg,
                               const PhysType& phys) {
     switch (cfg.limiter) {
         case LimiterType::Venkatakrishnan:
-            return dispatch_time_scheme<EosType, FluxType,
+            return dispatch_time_mode<EosType, FluxType,
                                         MultidimRecon<limiter::Venkatakrishnan>, PhysType>(
                 cfg, bcfg, mp, comm, eos, phys);
 
         case LimiterType::BarthJespersen:
-            return dispatch_time_scheme<EosType, FluxType,
+            return dispatch_time_mode<EosType, FluxType,
                                         MultidimRecon<limiter::BarthJespersen>, PhysType>(
                 cfg, bcfg, mp, comm, eos, phys);
 
         case LimiterType::VanAlbada:
-            return dispatch_time_scheme<EosType, FluxType,
+            return dispatch_time_mode<EosType, FluxType,
                                         MultidimRecon<limiter::VanAlbada>, PhysType>(
                 cfg, bcfg, mp, comm, eos, phys);
 
@@ -86,12 +121,12 @@ int dispatch_directional_limiter(const SolverConfig& cfg,
                                  const PhysType& phys) {
     switch (cfg.limiter) {
         case LimiterType::Minmod1D:
-            return dispatch_time_scheme<EosType, FluxType,
+            return dispatch_time_mode<EosType, FluxType,
                                         DirectionalRecon<limiter::Minmod1D>, PhysType>(
                 cfg, bcfg, mp, comm, eos, phys);
 
         case LimiterType::VanAlbada1D:
-            return dispatch_time_scheme<EosType, FluxType,
+            return dispatch_time_mode<EosType, FluxType,
                                         DirectionalRecon<limiter::VanAlbada1D>, PhysType>(
                 cfg, bcfg, mp, comm, eos, phys);
 
@@ -111,7 +146,7 @@ int dispatch_reconstruction(const SolverConfig& cfg,
                             const PhysType& phys) {
     switch (cfg.reconstruction) {
         case ReconType::FirstOrder:
-            return dispatch_time_scheme<EosType, FluxType, recon::FirstOrder, PhysType>(
+            return dispatch_time_mode<EosType, FluxType, recon::FirstOrder, PhysType>(
                 cfg, bcfg, mp, comm, eos, phys);
 
         case ReconType::Muscl:

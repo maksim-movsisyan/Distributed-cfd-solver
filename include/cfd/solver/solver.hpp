@@ -210,9 +210,14 @@ public:
             bcs_.update_ghost_cells_grad(q_const_slots_, gx_slots_, gy_slots_, gz_slots_, mesh_);
 
             if constexpr (ReconPolicy::kNeedsGradients) {
-                ReconPolicy::compute_limiters(mesh_, aux_conn_, q_const_slots_.data(),
-                                              gx_const_slots_.data(), gy_const_slots_.data(), gz_const_slots_.data(),
-                                              phi_slots_.data(), cfg_.limiter_venkat_k);
+                ReconPolicy::template compute_limiters<PhysPolicy::kNumVars>(
+                    mesh_, aux_conn_, 
+                    q_const_slots_.data(),
+                    gx_const_slots_.data(), 
+                    gy_const_slots_.data(), 
+                    gz_const_slots_.data(),
+                    phi_slots_.data(), 
+                    cfg_.limiter_venkat_k);
             }
             if constexpr (kHasModules) {
                 phys_.compute_gradients(grad_mgr_, mesh_);
@@ -805,9 +810,14 @@ private:
             bcs_.update_ghost_cells_grad(q_const_slots_, gx_slots_, gy_slots_, gz_slots_, mesh_);
 
             if constexpr (ReconPolicy::kNeedsGradients) {
-                ReconPolicy::compute_limiters(mesh_, aux_conn_, q_const_slots_,
-                                              gx_const_slots_, gy_const_slots_, gz_const_slots_,
-                                              phi_slots_, cfg_.limiter_venkat_k);
+                ReconPolicy::template compute_limiters<PhysPolicy::kNumVars>(
+                    mesh_, aux_conn_, 
+                    q_const_slots_.data(),
+                    gx_const_slots_.data(), 
+                    gy_const_slots_.data(), 
+                    gz_const_slots_.data(),
+                    phi_slots_.data(), 
+                    cfg_.limiter_venkat_k);
             }
             if constexpr (kHasModules) {
                 phys_.compute_gradients(grad_mgr_, mesh_);

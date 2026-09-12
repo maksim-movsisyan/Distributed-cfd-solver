@@ -5,8 +5,7 @@
 #include <algorithm>
 #include <cmath>
 
-#include "cfd/core/types.hpp"
-#include "cfd/solver/eos/eos_concept.hpp"
+#include "cfd/solver/eos/concepts.hpp"
 #include "cfd/solver/eos/state_conversions.hpp"
 
 namespace cfd::solver::fluxes {
@@ -19,13 +18,13 @@ struct HllcFlux {
     // =========================================================================
     // Computes numerical convective flux F = area * F_num(UL, UR, n)
     // and returns max wave speed estimate smax for local CFL time stepping.
-    template <eos::EquationOfState EOS>
+    template <eos::EquationOfStatePolicy EOS>
     static inline void face_flux(const EOS& eos,
-                                 const double UL[constants::kNumVars],
-                                 const double UR[constants::kNumVars],
+                                 const double UL[5],
+                                 const double UR[5],
                                  const double nx, const double ny, const double nz,
                                  const double area,
-                                 double F[constants::kNumVars],
+                                 double F[5],
                                  double& smax) noexcept {
         // --- Primitive reconstruction & Fast Inverses ---
         const double rhoL = UL[0];
@@ -84,7 +83,7 @@ struct HllcFlux {
 
         // --- Branching & Lazy Flux Evaluation ---
         if (SM >= 0.0) {
-            const double FL[constants::kNumVars] = {
+            const double FL[5] = {
                 rhoL * unL,
                 rhoL * uLx * unL + pL * nx,
                 rhoL * uLy * unL + pL * ny,
@@ -94,7 +93,7 @@ struct HllcFlux {
 
             if (SL >= 0.0) {
                 // Supersonic Left -> Right
-                for (int v = 0; v < constants::kNumVars; ++v) {
+                for (int v = 0; v < 5; ++v) {
                     F[v] = FL[v] * area;
                 }
             } else {
@@ -102,7 +101,7 @@ struct HllcFlux {
                 star_flux(UL, FL, rhoL, pL, uLx, uLy, uLz, unL, aL, SL, SM, nx, ny, nz, area, F);
             }
         } else {
-            const double FR[constants::kNumVars] = {
+            const double FR[5] = {
                 rhoR * unR,
                 rhoR * uRx * unR + pR * nx,
                 rhoR * uRy * unR + pR * ny,
@@ -112,7 +111,7 @@ struct HllcFlux {
 
             if (SR <= 0.0) {
                 // Supersonic Right -> Left
-                for (int v = 0; v < constants::kNumVars; ++v) {
+                for (int v = 0; v < 5; ++v) {
                     F[v] = FR[v] * area;
                 }
             } else {
@@ -133,15 +132,15 @@ struct HllcFlux {
     //
     // Guaranteed M-matrix property on the diagonal, non-zero coupling across
     // the face, and zero finite-difference overhead.
-    template <eos::EquationOfState EOS>
+    template <eos::EquationOfStatePolicy EOS>
     static inline void face_flux_jacobian(const EOS& eos,
-                                          const double UL[constants::kNumVars],
-                                          const double UR[constants::kNumVars],
+                                          const double UL[5],
+                                          const double UR[5],
                                           const double nx, const double ny, const double nz,
                                           const double area,
-                                          double dFL[constants::kNumVars * constants::kNumVars],
-                                          double dFR[constants::kNumVars * constants::kNumVars]) noexcept {
-        constexpr int N = constants::kNumVars;
+                                          double dFL[25],
+                                          double dFR[25]) noexcept {
+        constexpr int N = 5;
 
         // Frozen wave speed estimation from current states
         double F0[N];
@@ -170,13 +169,13 @@ struct HllcFlux {
 
 private:
     // Closed-form analytical Jacobian of normal physical Euler flux (5x5, row-major)
-    template <eos::EquationOfState EOS>
+    template <eos::EquationOfStatePolicy EOS>
     static inline void analytical_physical_jacobian(const EOS& eos,
-                                                    const double U[constants::kNumVars],
+                                                    const double U[5],
                                                     const double nx,
                                                     const double ny,
                                                     const double nz,
-                                                    double J[constants::kNumVars * constants::kNumVars]) noexcept {
+                                                    double J[25]) noexcept {
         const double rho = U[0];
         const double inv_rho = 1.0 / rho;
         const double u = U[1] * inv_rho;
@@ -229,8 +228,8 @@ private:
         J[24] = gamma * un;
     }
 
-    static inline void star_flux(const double UK[constants::kNumVars],
-                                 const double FK[constants::kNumVars],
+    static inline void star_flux(const double UK[5],
+                                 const double FK[5],
                                  const double rhoK,
                                  const double pK,
                                  const double ux,
@@ -244,10 +243,10 @@ private:
                                  const double ny,
                                  const double nz,
                                  const double area,
-                                 double F[constants::kNumVars]) noexcept {
+                                 double F[5]) noexcept {
         const double den = SK - SM;
         if (std::fabs(den) < 1.0e-6 * (ak + std::fabs(SK))) {
-            for (int v = 0; v < constants::kNumVars; ++v) {
+            for (int v = 0; v < 5; ++v) {
                 F[v] = FK[v] * area;
             }
             return;
@@ -261,7 +260,7 @@ private:
         const double p_term = pK / (rhoK * d_wave);
         const double e_star = UK[4] + rhoK * d * (SM + p_term);
 
-        const double Ust[constants::kNumVars] = {
+        const double Ust[5] = {
             q * rhoK,
             q * rhoK * (ux + d * nx),
             q * rhoK * (uy + d * ny),
@@ -269,7 +268,7 @@ private:
             q * e_star
         };
 
-        for (int v = 0; v < constants::kNumVars; ++v) {
+        for (int v = 0; v < 5; ++v) {
             F[v] = (FK[v] + SK * (Ust[v] - UK[v])) * area;
         }
     }

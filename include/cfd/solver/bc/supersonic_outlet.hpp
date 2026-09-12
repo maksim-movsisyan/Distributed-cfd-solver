@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cassert>
 #include <cstddef>
+#include <span>
 #include <string>
 #include <utility>
 
@@ -9,12 +11,14 @@
 #include "cfd/solver/bc/bc.hpp"
 #include "cfd/solver/bc/bc_fill_gradients.hpp"
 #include "cfd/solver/bc/bc_fill_values.hpp"
-#include "cfd/fields/fields_view.hpp"
+#include "cfd/solver/eos/concepts.hpp"
 
 namespace cfd::solver::bc {
 
-/** @brief Set value in ghost cell */
-inline void supersonic_outlet_kernel(fields::PrimitiveView<double> s,
+namespace {
+
+/** @brief Fills ghost cells with state values for Supersonic Outlet */
+inline void supersonic_outlet_kernel(std::span<double* const> q,
                                      const mesh::MeshPart& m,
                                      const LocalIndex fbeg,
                                      const LocalIndex fend) noexcept {
@@ -29,28 +33,29 @@ inline void supersonic_outlet_kernel(fields::PrimitiveView<double> s,
     // Unpack topology array with restrict
     const LocalIndex* CFD_RESTRICT face_owner = m.face_owner.data();
 
-    for (std::size_t face_idx = beg; face_idx < end; ++face_idx) {
-        const auto in = static_cast<std::size_t>(face_owner[face_idx]); // inner (real) cell
-        const auto gh = n_cells + f_loc;                                  // ghost cell = n_cells + local boundary face idx
+    // Cache local pointers with restrict
+    double* CFD_RESTRICT local_q[5];
+    for (std::size_t v = 0; v < 5; ++v) {
+        local_q[v] = q[v];
+    }
 
-        // ==== Extrapolation of all variables (zero-gradient Neumann) ====
-        // ==== pressure ====
-        apply_extrapolation0_bc(s.prs[gh], s.prs[in]);
-        // ==== x-velocity ====
-        apply_extrapolation0_bc(s.vx[gh], s.vx[in]);
-        // ==== y-velocity ====
-        apply_extrapolation0_bc(s.vy[gh], s.vy[in]);
-        // ==== z-velocity ====
-        apply_extrapolation0_bc(s.vz[gh], s.vz[in]);
-        // ==== temperature ====
-        apply_extrapolation0_bc(s.tmp[gh], s.tmp[in]);
+    for (std::size_t face_idx = beg; face_idx < end; ++face_idx) {
+        const auto in = static_cast<std::size_t>(face_owner[face_idx]);
+        const auto gh = n_cells + f_loc;
+
+        // In supersonic outflow, all characteristics exit domain: full Neumann extrapolation
+        for (std::size_t v = 0; v < 5; ++v) {
+            apply_extrapolation0_bc(local_q[v][gh], local_q[v][in]);
+        }
 
         ++f_loc;
     }
 }
 
-/** @brief Set gradient in ghost cell */
-inline void supersonic_outlet_grad_kernel(fields::PrimitiveGradView<double> s_grad,
+/** @brief Fills ghost cells with gradients for Supersonic Outlet */
+inline void supersonic_outlet_grad_kernel(std::span<double* const> gx,
+                                          std::span<double* const> gy,
+                                          std::span<double* const> gz,
                                           const mesh::MeshPart& m,
                                           const LocalIndex fbeg,
                                           const LocalIndex fend) noexcept {
@@ -66,51 +71,46 @@ inline void supersonic_outlet_grad_kernel(fields::PrimitiveGradView<double> s_gr
     const LocalIndex* CFD_RESTRICT face_owner = m.face_owner.data();
 
     for (std::size_t face_idx = beg; face_idx < end; ++face_idx) {
-        const auto in = static_cast<std::size_t>(face_owner[face_idx]); // inner (real) cell
-        const auto gh = n_cells + f_loc;                                  // ghost cell = n_cells + local boundary face idx
+        const auto in = static_cast<std::size_t>(face_owner[face_idx]);
+        const auto gh = n_cells + f_loc;
 
-        // ==== fill gradients in ghost cell ====
-        // ==== pressure ====
-        apply_grad_extrapolation0_bc(s_grad.dprs_dx(gh), s_grad.dprs_dy(gh), s_grad.dprs_dz(gh),
-                                     s_grad.dprs_dx(in), s_grad.dprs_dy(in), s_grad.dprs_dz(in));
-        // ==== x-velocity ====
-        apply_grad_extrapolation0_bc(s_grad.dvx_dx(gh), s_grad.dvx_dy(gh), s_grad.dvx_dz(gh),
-                                     s_grad.dvx_dx(in), s_grad.dvx_dy(in), s_grad.dvx_dz(in));
-        // ==== y-velocity ====
-        apply_grad_extrapolation0_bc(s_grad.dvy_dx(gh), s_grad.dvy_dy(gh), s_grad.dvy_dz(gh),
-                                     s_grad.dvy_dx(in), s_grad.dvy_dy(in), s_grad.dvy_dz(in));
-        // ==== z-velocity ====
-        apply_grad_extrapolation0_bc(s_grad.dvz_dx(gh), s_grad.dvz_dy(gh), s_grad.dvz_dz(gh),
-                                     s_grad.dvz_dx(in), s_grad.dvz_dy(in), s_grad.dvz_dz(in));
-        // ==== temperature ====
-        apply_grad_extrapolation0_bc(s_grad.dtmp_dx(gh), s_grad.dtmp_dy(gh), s_grad.dtmp_dz(gh),
-                                     s_grad.dtmp_dx(in), s_grad.dtmp_dy(in), s_grad.dtmp_dz(in));
+        // Zero-order extrapolation of all gradient components
+        for (std::size_t v = 0; v < 5; ++v) {
+            apply_grad_extrapolation0_bc(gx[v][gh], gy[v][gh], gz[v][gh],
+                                         gx[v][in], gy[v][in], gz[v][in]);
+        }
 
         ++f_loc;
     }
 }
 
+} // anonymous namespace
+
 /**
  * @class SupersonicOutletBC
  * @brief Supersonic outlet boundary condition implementation.
- * All variables and gradients are fully extrapolated from the adjacent inner cells.
+ * All variables and gradients are fully extrapolated from the adjacent interior cells.
  */
-template <eos::EquationOfState EOS>
+template <eos::EquationOfStatePolicy EOS>
 class SupersonicOutletBC final : public BoundaryCondition<EOS> {
 public:
     SupersonicOutletBC(std::string zone, const LocalIndex fbeg, const LocalIndex fend)
         : BoundaryCondition<EOS>(std::move(zone), fbeg, fend) {}
 
-    void apply(fields::PrimitiveView<double> state,
-               const mesh::MeshPart& mesh,
-               const EOS& /*eos*/) const override {
-        supersonic_outlet_kernel(state, mesh, this->m_begin, this->m_end);
+    void update_ghost_cells(std::span<double* const> q,
+                            const mesh::MeshPart& mesh,
+                            const EOS& /*eos*/) const override {
+        assert(q.size() == 5 && "SupersonicOutletBC requires exactly 5 mean-flow variables");
+        supersonic_outlet_kernel(q, mesh, this->m_begin, this->m_end);
     }
 
-    void apply_grad(fields::ConstPrimitiveView /*state*/,
-                    fields::PrimitiveGradView<double> state_grad,
-                    const mesh::MeshPart& mesh) const override {
-        supersonic_outlet_grad_kernel(state_grad, mesh, this->m_begin, this->m_end);
+    void update_ghost_cells_grad(std::span<const double* const> /*q*/,
+                                 std::span<double* const> gx,
+                                 std::span<double* const> gy,
+                                 std::span<double* const> gz,
+                                 const mesh::MeshPart& mesh) const override {
+        assert(gx.size() == 5 && gy.size() == 5 && gz.size() == 5);
+        supersonic_outlet_grad_kernel(gx, gy, gz, mesh, this->m_begin, this->m_end);
     }
 
     [[nodiscard]] BCType kind() const noexcept override { return BCType::SupersonicOutlet; }

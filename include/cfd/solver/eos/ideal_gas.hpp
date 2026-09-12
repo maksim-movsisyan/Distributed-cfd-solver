@@ -3,7 +3,7 @@
 #include <cmath>
 
 #include "cfd/core/types.hpp"
-#include "cfd/solver/eos/eos_concept.hpp"
+#include "cfd/solver/eos/concepts.hpp"
 
 namespace cfd::solver::eos {
 
@@ -85,6 +85,6 @@ struct IdealGas {
 };
 
 // Static compile-time verification that IdealGas satisfies the concept
-static_assert(EquationOfState<IdealGas>);
+static_assert(EquationOfStatePolicy<IdealGas>);
 
 } // namespace cfd::solver::eos

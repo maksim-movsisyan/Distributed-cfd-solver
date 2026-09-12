@@ -27,21 +27,30 @@ void GradientManager::create_gradient(const GradientType& name) {
     grad_ = it->second();
 }
 
-void GradientManager::setup_gradient(const mesh::MeshPart& mesh, mesh::MeshAuxConnectivity& aux_conn) {
+void GradientManager::setup_gradient(const mesh::MeshPart& mesh, 
+                                     mesh::MeshAuxConnectivity& aux_conn) {
     assert(grad_ && "GradientManager::setup_gradient: gradient operator was not created! Call create_gradient() first.");
     grad_->setup(mesh, aux_conn);
 }
 
-void GradientManager::apply_gradient(const double* s, double* g, const std::size_t stride, 
-                        const mesh::MeshPart& mesh, const mesh::MeshAuxConnectivity& aux_conn) const {
+void GradientManager::apply_gradient(const double* CFD_RESTRICT s,
+                                     double* CFD_RESTRICT gx,
+                                     double* CFD_RESTRICT gy,
+                                     double* CFD_RESTRICT gz,
+                                     const mesh::MeshPart& mesh, 
+                                     const mesh::MeshAuxConnectivity& aux_conn) const {
     assert(grad_ && "GradientManager::apply_gradient: gradient operator is nullptr!");
-    grad_->apply(s, g, stride, mesh, aux_conn);
+    grad_->apply(s, gx, gy, gz, mesh, aux_conn);
 }
 
-void GradientManager::apply_gradient_set(std::span<const double*> s, std::span<double*> g, const std::size_t stride, 
-                            const mesh::MeshPart& mesh, const mesh::MeshAuxConnectivity& aux_conn) const {
+void GradientManager::apply_gradient_set(std::span<const double* const> s,
+                                         std::span<double* const> gx,
+                                         std::span<double* const> gy,
+                                         std::span<double* const> gz,
+                                         const mesh::MeshPart& mesh,
+                                         const mesh::MeshAuxConnectivity& aux_conn) const {
     assert(grad_ && "GradientManager::apply_gradient_set: gradient operator is nullptr!");
-    grad_->apply_set(s, g, stride, mesh, aux_conn);
+    grad_->apply_set(s, gx, gy, gz, mesh, aux_conn);
 }
 
 } // namespace cfd::numerics::gradient

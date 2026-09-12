@@ -15,7 +15,7 @@ namespace cfd::solver::physics {
 template <typename P>
 concept PhysicsGeneral = requires() {
     // 1. Equation-set metadata
-    { P::kNumVars } -> std::convertible_to<std::size_t>;  // mean-flow variables
+    { P::kNumVars } -> std::convertible_to<std::size_t>;  // mean-flow variables (or additional variables in modules)
     { P::kHasViscous } -> std::convertible_to<bool>;      // adds viscous face fluxes
     { P::kNeedsGradients } -> std::convertible_to<bool>;  // forces cell gradients
     { P::kAuxGeometry } -> std::convertible_to<mesh::AuxGeomType>;

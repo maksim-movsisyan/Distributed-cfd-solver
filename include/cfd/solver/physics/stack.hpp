@@ -1,14 +1,3 @@
-// Compile-time physics stack: mean-flow equation set + physics modules.
-//
-// Composed at compile time (design-01 Q1 decision): every module hook folds to
-// a direct inlined call, and an EMPTY module list folds to nothing — the plain
-// Euler / laminar Navier-Stokes stacks are behaviorally identical to running
-// without any module machinery at all.
-//
-// The stack satisfies physics::FlowPhysics (it IS the solver's physics
-// argument): mean-flow geometry and viscous fluxes delegate to the base, with
-// the modules' eddy viscosity threaded through. Module orchestration hooks
-// (fields / halo / BCs / kernels / clamps / output) are consumed by the Solver.
 #pragma once
 
 #include <mpi.h>
@@ -24,12 +13,11 @@
 #include "cfd/mesh/localmesh.hpp"
 #include "cfd/mesh/aux_connectivity.hpp"
 #include "cfd/mesh/aux_geometry.hpp"
-#include "cfd/solver/bc/config.hpp"
-#include "cfd/solver/eos/eos_concept.hpp"
 #include "cfd/fields/fields_manager.hpp"
-#include "cfd/fields/fields_view.hpp"
-#include "cfd/numerics/gradient/gradient_manager.hpp"
 #include "cfd/fields/halo.hpp"
+#include "cfd/numerics/gradient/gradient_manager.hpp"
+#include "cfd/solver/bc/config.hpp"
+#include "cfd/solver/eos/concepts.hpp"
 #include "cfd/solver/physics/physics_concepts.hpp"
 #include "cfd/solver/physics/inviscid_flow.hpp"
 #include "cfd/solver/physics/viscous_flow.hpp"
@@ -85,20 +73,18 @@ public:
     // --- Module orchestration folds -------------------------------------------
 
     void register_fields(fields::FieldsManager& mgr,
-                         const std::size_t n_total, const bool needs_prev_snapshot) {
+                         const std::size_t n_total) {
         std::apply([&](auto&... m) {
-            (m.register_fields(mgr, n_total, needs_prev_snapshot), ...);
+            (m.register_fields(mgr, n_total), ...);
         }, modules);
     }
 
     void append_update_slots(std::vector<double*>& u,
-                             std::vector<double*>& prev,
                              std::vector<double*>& stage,
                              std::vector<double*>& res,
-                             fields::FieldsManager& mgr,
-                             const bool needs_prev_snapshot) {
+                             fields::FieldsManager& mgr) {
         std::apply([&](auto&... m) {
-            (m.append_update_slots(u, prev, stage, res, mgr, needs_prev_snapshot), ...);
+            (m.append_update_slots(u, stage, res, mgr), ...);
         }, modules);
     }
 
@@ -108,7 +94,7 @@ public:
         }, modules);
     }
 
-    void bind_primitives(const fields::ConstPrimitiveView q) {
+    void bind_primitives(std::span<const double*> q) {
         std::apply([&](auto&... m) {
             (m.bind_primitives(q), ...);
         }, modules);
@@ -120,7 +106,7 @@ public:
         }, modules);
     }
 
-    template <eos::EquationOfState EOS>
+    template <eos::EquationOfStatePolicy EOS>
     void initialize(const mesh::MeshPart& mesh,
                     const mesh::MeshAuxConnectivity& aux_conn,
                     const mesh::MeshAuxGeometry& aux_geom,
@@ -139,7 +125,7 @@ public:
         }, modules);
     }
 
-    template <eos::EquationOfState EOS>
+    template <eos::EquationOfStatePolicy EOS>
     void apply_bcs(const EOS& eos, const mesh::MeshPart& mesh) const {
         std::apply([&](const auto&... m) {
             (m.template apply_bcs<EOS>(eos, mesh), ...);
@@ -153,14 +139,14 @@ public:
         }, modules);
     }
 
-    template <eos::EquationOfState EOS>
+    template <eos::EquationOfStatePolicy EOS>
     void pre_sweep(const EOS& eos, const mesh::MeshPart& mesh) {
         std::apply([&](auto&... m) {
             (m.template pre_sweep<EOS>(eos, mesh), ...);
         }, modules);
     }
 
-    template <eos::EquationOfState EOS>
+    template <eos::EquationOfStatePolicy EOS>
     void face_sweep(const EOS& eos,
                     const mesh::MeshPart& mesh,
                     const mesh::MeshAuxConnectivity& aux_conn,
@@ -172,12 +158,14 @@ public:
         }, modules);
     }
 
-    template <eos::EquationOfState EOS>
+    template <eos::EquationOfStatePolicy EOS>
     void cell_sources(const EOS& eos,
                       const mesh::MeshPart& mesh,
-                      const fields::ConstPrimitiveGradView mean_grad) {
+                      std::span<const double*> gx,
+                      std::span<const double*> gy,
+                      std::span<const double*> gz) {
         std::apply([&](auto&... m) {
-            (m.template cell_sources<EOS>(eos, mesh, mean_grad), ...);
+            (m.template cell_sources<EOS>(eos, mesh, gx, gy, gz), ...);
         }, modules);
     }
 

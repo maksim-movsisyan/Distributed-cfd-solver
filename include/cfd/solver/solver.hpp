@@ -29,26 +29,28 @@
 #include "cfd/mesh/aux_geometry.hpp"
 #include "cfd/mpi/log.hpp"
 #include "cfd/mpi/mpi_util.hpp"
+#include "cfd/fields/halo.hpp"
+#include "cfd/fields/fields_manager.hpp"
+#include "cfd/numerics/gradient/gradient_manager.hpp"
+#include "cfd/numerics/reconstruction/concepts.hpp"
+
+
 #include "cfd/solver/bc/bc_manager.hpp"
 #include "cfd/solver/bc/config.hpp"
 #include "cfd/solver/config.hpp"
-#include "cfd/solver/eos/eos_concept.hpp"
+#include "cfd/solver/eos/concepts.hpp"
 #include "cfd/solver/eos/state_conversions.hpp"
-#include "cfd/fields/fields_manager.hpp"
-#include "cfd/fields/fields_view.hpp"
-#include "cfd/numerics/gradient/gradient_manager.hpp"
-#include "cfd/fields/halo.hpp"
 #include "cfd/solver/physics/physics_concepts.hpp"
-#include "cfd/solver/reconstruction/reconstruction.hpp"
 #include "cfd/solver/residual_kernel.hpp"
 #include "cfd/solver/jacobian_kernel.hpp"
-#include "cfd/solver/time/time_policy.hpp"
+#include "cfd/solver/time/concepts.hpp"
 #include "cfd/solver/time/time_mode.hpp"
 
 namespace cfd::solver {
 
-template <eos::EquationOfState EOS, typename FluxPolicy, recon::ReconstructionPolicy ReconPolicy,
+template <eos::EquationOfStatePolicy EOS, typename FluxPolicy, typename ReconPolicy,
           physics::PhysicsGeneral PhysPolicy, template <typename> class TimePolicyT, typename TimeMode = time::SteadyMode>
+          requires numerics::recon::ReconstructionPolicy<ReconPolicy, PhysPolicy::kNumVars>
 class Solver {
 public:
     // Concrete time policy bound to this solver instantiation. The injected
@@ -72,8 +74,8 @@ public:
 
     Solver(const SolverConfig& cfg,
            const bc::BoundaryConfig& bcfg,
-           const EOS eos,
-           const PhysPolicy phys,
+           const EOS& eos,
+           const PhysPolicy& phys,
            const mesh::MeshPart& mesh,
            const MPI_Comm comm)
         : mesh_(mesh),
@@ -88,7 +90,7 @@ public:
           halo_(mesh, comm),
           comm_(comm) {
 
-        // 1. Initialize boundary conditions
+        // 1. Initialize boundary condition patches
         bcs_.initialize(bcfg, mesh, eos_);
 
         // 2. Allocate SoA storage in FieldsManager
@@ -101,27 +103,23 @@ public:
 
         allocate_fields(n_total);
 
-        // 2b. Physics modules: fields + update slots (appended after the
-        //     mean-flow variables, so time integrators advance them jointly)
+        // 2b. Physics modules variable registration
         if constexpr (kHasModules) {
-            phys_.register_fields(mgr_, n_total, TimePolicy::kNeedsPrevSnapshot);
+            phys_.register_fields(mgr_, n_total);
         }
 
-        // 3. Build fast non-owning Views and the update-block slot registry
-        bind_views();
+        // 3. Bind SoA pointer slots
+        bind_slots();
 
         if constexpr (kHasModules) {
-            phys_.append_update_slots(u_slots_, prev_slots_, stage_slots_, res_slots_,
-                                      mgr_, TimePolicy::kNeedsPrevSnapshot);
+            phys_.append_update_slots(u_slots_, stage_slots_, res_slots_, mgr_);
         }
 
-        // 4. Register the stable SoA views with the aggregated halo engine
-        //    (single message per neighbour per phase; modules join the same
-        //    messages)
+        // 4. Register stable SoA buffers with MPI halo exchanger
         register_halo_payloads();
         if constexpr (kHasModules) {
             phys_.register_halo(halo_, mgr_);
-            phys_.bind_primitives(q_view_.as_const());
+            phys_.bind_primitives(q_const_slots_);
         }
 
         // 5. Allocate step metrics (+ module face mass flux storage)
@@ -132,23 +130,21 @@ public:
             mdot_.assign(n_faces, 0.0);
         }
 
-        // 6. Creat mesh auxiliary geometry and connectivity
+        // 6. Build dual connectivity and auxiliary geometry
         aux_conn_.add_connectivity(mesh, kAuxConnectivity);
         aux_geom_.add_geometry(mesh, kAuxGeometry);
 
-        // 7. Gradient method + module initialization (BCs, wall distance) +
-        //    reconstruction geometry (mesh-fixed)
+        // 7. Gradient manager and physics initialization
         if constexpr (kNeedsGradients) {
             grad_mgr_.create_gradient(cfg.gradient); 
             grad_mgr_.setup_gradient(mesh, aux_conn_);
-            grad_stride_ = n_total;
         }
         if constexpr (kHasModules) {
             phys_.set_freestream_state(cfg_.init_rho, cfg_.init_p);
             phys_.template initialize<EOS>(mesh, aux_conn_, aux_geom_, bcfg, eos_, halo_, comm_);
         }
 
-        // 8. For implicit scheme
+        // 8. Implicit solver linear system assembly setup
         if constexpr (kNeedsMatrix) {
             time_.system_setup(mesh, aux_conn_, cfg.linear_solver_params, comm_);
         }
@@ -156,7 +152,7 @@ public:
 
     int run() {
         static_assert(time::TimeIntegrationPolicy<TimePolicy>,
-                      "time policy must satisfy the time::TimeIntegrationPolicy concept");
+                      "Time policy must satisfy the time::TimeIntegrationPolicy concept");
 
         init_fields();
         if constexpr (TimeMode::kIsUnsteady) {
@@ -169,24 +165,27 @@ public:
     // --- Residual Operator interface (consumed by TimePolicy) ----------------
 
     /**
-     * @brief Evaluates the full residual pipeline R(state) for the given
-     *        update-block state slots (u or a stage buffer).
+     * @brief Evaluates spatial residual R(state) for the active update-block slots.
      */
     void evaluate_residual(const std::span<double* const> state) noexcept {
         const std::size_t n_own = static_cast<std::size_t>(mesh_.n_own);
 
-        // 1. Owned conservative states -> primitives
+        // 1. Convert owned cell conservative state to primitives
         const double* CFD_RESTRICT s0 = state[0];
         const double* CFD_RESTRICT s1 = state[1];
         const double* CFD_RESTRICT s2 = state[2];
         const double* CFD_RESTRICT s3 = state[3];
         const double* CFD_RESTRICT s4 = state[4];
+
+        double* CFD_RESTRICT q_p = q_slots_[0];
+        double* CFD_RESTRICT q_u = q_slots_[1];
+        double* CFD_RESTRICT q_v = q_slots_[2];
+        double* CFD_RESTRICT q_w = q_slots_[3];
+        double* CFD_RESTRICT q_T = q_slots_[4];
+        
         for (std::size_t c = 0; c < n_own; ++c) {
             const double U_c[PhysPolicy::kNumVars] = {s0[c], s1[c], s2[c], s3[c], s4[c]};
-            eos::conserved_to_primitives_pT(eos_, U_c,
-                                            q_view_.prs[c], q_view_.vx[c],
-                                            q_view_.vy[c], q_view_.vz[c],
-                                            q_view_.tmp[c]);
+            eos::conserved_to_primitives_pT(eos_, U_c, q_p[c], q_u[c], q_v[c], q_w[c], q_T[c]);
         }
 
         // 2. MPI halo exchange on primitives + module variables (one message)
@@ -194,7 +193,7 @@ public:
 
         // 3. Boundary condition ghosts on the primitive fields, then module
         //    variables (module inflow ghosts read the mean-flow ghost state)
-        bcs_.apply_all(q_view_, mesh_);
+        bcs_.update_ghost_cells(q_slots_, mesh_);
         if constexpr (kHasModules) {
             phys_.apply_bcs(eos_, mesh_);
         }
@@ -207,11 +206,13 @@ public:
 
         // 5. Gradients and limiters over owned cells + BCs + packed MPI exchange
         if constexpr (kNeedsGradients) {
-            grad_mgr_.apply_gradient_set(q_slots_, grad_slots_, grad_stride_, mesh_, aux_conn_);
-            bcs_.apply_grad_all(q_view_.as_const(), grad_view_, mesh_);
+            grad_mgr_.apply_gradient_set(q_const_slots_, gx_slots_, gy_slots_, gz_slots_, mesh_, aux_conn_);
+            bcs_.update_ghost_cells_grad(q_const_slots_, gx_slots_, gy_slots_, gz_slots_, mesh_);
+
             if constexpr (ReconPolicy::kNeedsGradients) {
-                ReconPolicy::compute_limiters(mesh_, aux_conn_, q_view_.as_const(),
-                                              grad_view_.as_const(), phi_view_, cfg_.limiter_venkat_k);
+                ReconPolicy::compute_limiters(mesh_, aux_conn_, q_const_slots_.data(),
+                                              gx_const_slots_.data(), gy_const_slots_.data(), gz_const_slots_.data(),
+                                              phi_slots_.data(), cfg_.limiter_venkat_k);
             }
             if constexpr (kHasModules) {
                 phys_.compute_gradients(grad_mgr_, mesh_);
@@ -221,21 +222,21 @@ public:
 
         // 6. Mean-flow flux sweeps on the reconstructed primitive states
         //    (stores the face mass flux for module convection when requested)
-        residual_kernel_.apply(q_view_.as_const(), grad_view_.as_const(), phi_view_.as_const(),
-                      res_view_, lam_.data(), mut_ptr(),
-                      PhysPolicy::kNeedsFaceMdot ? mdot_.data() : nullptr);
+        residual_kernel_.apply(q_const_slots_, gx_const_slots_, gy_const_slots_, gz_const_slots_,
+                               phi_const_slots_, res_slots_, lam_.data(), mut_ptr(),
+                               PhysPolicy::kNeedsFaceMdot ? mdot_.data() : nullptr);
 
-        // 7. Module convection + diffusion (upwind on the shared mass flux)
+        // 7. Auxiliary module face sweeps (upwinded on convective mass flux)
         if constexpr (PhysPolicy::kNeedsFaceMdot) {
             phys_.face_sweep(eos_, mesh_, aux_conn_, aux_geom_, lam_.data(), mdot_.data());
         }
 
-        // 8. Module source terms (production / destruction)
+        // 8. Auxiliary module volumetric source terms
         if constexpr (kHasModules) {
-            phys_.cell_sources(eos_, mesh_, grad_view_.as_const());
+            phys_.cell_sources(eos_, mesh_, gx_const_slots_, gy_const_slots_, gz_const_slots_);
         }
 
-        // 9. For unsteady problems: add time terms to residual
+        // 9. Unsteady BDF pseudo-source contribution
         if constexpr (TimeMode::kIsUnsteady) {
             add_unsteady_source_term(state);
         }
@@ -245,7 +246,7 @@ public:
                            const LocalIndex* CFD_RESTRICT cols,
                            const LocalIndex* CFD_RESTRICT diag_idx,
                            double* CFD_RESTRICT values) {
-        jacobian_kernel_.apply(q_view_.as_const(), row_ptr, cols, diag_idx, values, alpha_.data(), mut_ptr());
+        jacobian_kernel_.apply(q_const_slots_, row_ptr, cols, diag_idx, values, alpha_.data(), mut_ptr());
     }
 
     void compute_dt() noexcept {
@@ -285,13 +286,10 @@ public:
 
     [[nodiscard]] std::span<double* const> u_slots() noexcept { return u_slots_; }
     [[nodiscard]] std::span<double* const> stage_slots() noexcept { return stage_slots_; }
-    [[nodiscard]] std::span<double* const> prev_slots() noexcept { return prev_slots_; }
     [[nodiscard]] std::span<double* const> res_slots() noexcept { return res_slots_; }
 
     [[nodiscard]] const double* alpha() const noexcept { return alpha_.data(); }
-    [[nodiscard]] std::size_t n_owned() const noexcept {
-        return static_cast<std::size_t>(mesh_.n_own);
-    }
+    [[nodiscard]] std::size_t n_owned() const noexcept { return static_cast<std::size_t>(mesh_.n_own); }
 
     /** @brief Swaps the primary and stage state slots (ping-pong buffers). */
     void ping_pong() noexcept { std::swap(u_slots_, stage_slots_); }
@@ -308,33 +306,33 @@ public:
     [[nodiscard]] const mesh::MeshPart& mesh() const noexcept { return mesh_; }
     [[nodiscard]] MPI_Comm mpi_comm() const noexcept { return comm_; }
     [[nodiscard]] const SolverConfig& config() const noexcept { return cfg_; }
-    /** @brief Local time step per owned cell [0, n_own). */
     [[nodiscard]] const double* local_dt() const noexcept { return dt_.data(); }
 
 private:
     // --- Memory Allocation, Views & Slot Binding ------------------------------
     void allocate_fields(const std::size_t n_total) {
-        // Primary State U & Q
+        // Conservative state variables
         mgr_.add_field<double>("rho",  n_total, fields::FieldLocation::Cell);
         mgr_.add_field<double>("rhou", n_total, fields::FieldLocation::Cell);
         mgr_.add_field<double>("rhov", n_total, fields::FieldLocation::Cell);
         mgr_.add_field<double>("rhow", n_total, fields::FieldLocation::Cell);
         mgr_.add_field<double>("rhoE", n_total, fields::FieldLocation::Cell);
 
+        // Primitive variables
         mgr_.add_field<double>("prs", n_total, fields::FieldLocation::Cell);
         mgr_.add_field<double>("vx",  n_total, fields::FieldLocation::Cell);
         mgr_.add_field<double>("vy",  n_total, fields::FieldLocation::Cell);
         mgr_.add_field<double>("vz",  n_total, fields::FieldLocation::Cell);
         mgr_.add_field<double>("tmp", n_total, fields::FieldLocation::Cell);
 
-        // Residuals
+        // Residual accumulators
         mgr_.add_field<double>("res1", n_total, fields::FieldLocation::Cell);
         mgr_.add_field<double>("res2", n_total, fields::FieldLocation::Cell);
         mgr_.add_field<double>("res3", n_total, fields::FieldLocation::Cell);
         mgr_.add_field<double>("res4", n_total, fields::FieldLocation::Cell);
         mgr_.add_field<double>("res5", n_total, fields::FieldLocation::Cell);
 
-        // Gradients and limiters (allocated if reconstruction OR physics need them)
+        // Gradient components and limiters
         if constexpr (kNeedsGradients) {
             const std::size_t n_plane = 3 * n_total;
             mgr_.add_field<double>("grad_prs", n_plane, fields::FieldLocation::Cell);
@@ -350,23 +348,14 @@ private:
             mgr_.add_field<double>("phi_tmp", n_total, fields::FieldLocation::Cell);
         }
 
-        // RK scratch: stage buffer always, u^n snapshot only for multistage schemes
-        if constexpr (TimePolicy::kNeedsPrevSnapshot) {
-            mgr_.add_field<double>("prev_rho",  n_total, fields::FieldLocation::Cell);
-            mgr_.add_field<double>("prev_rhou", n_total, fields::FieldLocation::Cell);
-            mgr_.add_field<double>("prev_rhov", n_total, fields::FieldLocation::Cell);
-            mgr_.add_field<double>("prev_rhow", n_total, fields::FieldLocation::Cell);
-            mgr_.add_field<double>("prev_rhoE", n_total, fields::FieldLocation::Cell);
-        }
-
         mgr_.add_field<double>("stage_rho",  n_total, fields::FieldLocation::Cell);
         mgr_.add_field<double>("stage_rhou", n_total, fields::FieldLocation::Cell);
         mgr_.add_field<double>("stage_rhov", n_total, fields::FieldLocation::Cell);
         mgr_.add_field<double>("stage_rhow", n_total, fields::FieldLocation::Cell);
         mgr_.add_field<double>("stage_rhoE", n_total, fields::FieldLocation::Cell);
 
+        // Physical time level snapshots for BDF time integration
         if constexpr (TimeMode::kIsUnsteady) {
-            // values at previous physical time step
             mgr_.add_field<double>("phys_un_rho",  n_total, fields::FieldLocation::Cell);
             mgr_.add_field<double>("phys_un_rhou", n_total, fields::FieldLocation::Cell);
             mgr_.add_field<double>("phys_un_rhov", n_total, fields::FieldLocation::Cell);
@@ -374,7 +363,6 @@ private:
             mgr_.add_field<double>("phys_un_rhoE", n_total, fields::FieldLocation::Cell);
 
             if constexpr (TimeMode::kBdfOrder == 2) {
-                // values at pre-previous physical time step
                 mgr_.add_field<double>("phys_unm1_rho",  n_total, fields::FieldLocation::Cell);
                 mgr_.add_field<double>("phys_unm1_rhou", n_total, fields::FieldLocation::Cell);
                 mgr_.add_field<double>("phys_unm1_rhov", n_total, fields::FieldLocation::Cell);
@@ -384,18 +372,19 @@ private:
         }
     }
 
-    void bind_views() {
-        q_view_ = {
+    void bind_slots() {
+        // Primitives SoA
+        q_slots_ = {
             mgr_.get_required_field_ptr<double>("prs"),
             mgr_.get_required_field_ptr<double>("vx"),
             mgr_.get_required_field_ptr<double>("vy"),
             mgr_.get_required_field_ptr<double>("vz"),
             mgr_.get_required_field_ptr<double>("tmp")
         };
+        q_const_slots_.assign(q_slots_.begin(), q_slots_.end());
 
-        q_slots_ = {q_view_.prs, q_view_.vx, q_view_.vy, q_view_.vz, q_view_.tmp};
-
-        res_view_ = {
+        // Residuals SoA
+        res_slots_ = {
             mgr_.get_required_field_ptr<double>("res1"),
             mgr_.get_required_field_ptr<double>("res2"),
             mgr_.get_required_field_ptr<double>("res3"),
@@ -403,9 +392,7 @@ private:
             mgr_.get_required_field_ptr<double>("res5")
         };
 
-        // Update-block slots: one entry per solvable variable per role. The
-        // u/stage vectors are swapped by ping_pong(); u_view() always reflects
-        // the current primary state.
+        // Primary state SoA
         u_slots_ = {
             mgr_.get_required_field_ptr<double>("rho"),
             mgr_.get_required_field_ptr<double>("rhou"),
@@ -422,28 +409,10 @@ private:
             mgr_.get_required_field_ptr<double>("stage_rhoE")
         };
 
-        if constexpr (TimePolicy::kNeedsPrevSnapshot) {
-            prev_slots_ = {
-                mgr_.get_required_field_ptr<double>("prev_rho"),
-                mgr_.get_required_field_ptr<double>("prev_rhou"),
-                mgr_.get_required_field_ptr<double>("prev_rhov"),
-                mgr_.get_required_field_ptr<double>("prev_rhow"),
-                mgr_.get_required_field_ptr<double>("prev_rhoE")
-            };
-        }
-
-        res_slots_ = {
-            mgr_.get_required_field_ptr<double>("res1"),
-            mgr_.get_required_field_ptr<double>("res2"),
-            mgr_.get_required_field_ptr<double>("res3"),
-            mgr_.get_required_field_ptr<double>("res4"),
-            mgr_.get_required_field_ptr<double>("res5")
-        };
-
         if constexpr (kNeedsGradients) {
             const std::size_t n_total = mgr_.get_field_size("rho");
-            grad_view_ = {
-                n_total,
+            
+            std::array<double*, 5> grad_slots_ = {
                 mgr_.get_required_field_ptr<double>("grad_prs"),
                 mgr_.get_required_field_ptr<double>("grad_vx"),
                 mgr_.get_required_field_ptr<double>("grad_vy"),
@@ -451,19 +420,43 @@ private:
                 mgr_.get_required_field_ptr<double>("grad_tmp")
             };
 
-            grad_slots_ = {grad_view_.prs_grad, grad_view_.vx_grad, grad_view_.vy_grad, grad_view_.vz_grad, grad_view_.tmp_grad};
+            gx_slots_ = {
+                grad_slots_[0],
+                grad_slots_[1],
+                grad_slots_[2],
+                grad_slots_[3],
+                grad_slots_[4]
+            };
+            gy_slots_ = {
+                grad_slots_[0] + n_total,
+                grad_slots_[1] + n_total,
+                grad_slots_[2] + n_total,
+                grad_slots_[3] + n_total,
+                grad_slots_[4] + n_total
+            };
+            gz_slots_ = {
+                grad_slots_[0] + 2 * n_total,
+                grad_slots_[1] + 2 * n_total,
+                grad_slots_[2] + 2 * n_total,
+                grad_slots_[3] + 2 * n_total,
+                grad_slots_[4] + 2 * n_total
+            };
 
-            phi_view_ = {
+            gx_const_slots_.assign(gx_slots_.begin(), gx_slots_.end());
+            gy_const_slots_.assign(gy_slots_.begin(), gy_slots_.end());
+            gz_const_slots_.assign(gz_slots_.begin(), gz_slots_.end());
+
+            phi_slots_ = {
                 mgr_.get_required_field_ptr<double>("phi_prs"),
                 mgr_.get_required_field_ptr<double>("phi_vx"),
                 mgr_.get_required_field_ptr<double>("phi_vy"),
                 mgr_.get_required_field_ptr<double>("phi_vz"),
                 mgr_.get_required_field_ptr<double>("phi_tmp")
             };
+            phi_const_slots_.assign(phi_slots_.begin(), phi_slots_.end());
         }
 
         if constexpr (TimeMode::kIsUnsteady) {
-            // values at previous physical time step
             phys_un_slots_ = {
                 mgr_.get_required_field_ptr<double>("phys_un_rho"),
                 mgr_.get_required_field_ptr<double>("phys_un_rhou"),
@@ -473,7 +466,6 @@ private:
             };
 
             if constexpr (TimeMode::kBdfOrder == 2) {
-                // values at pre-previous physical time step
                 phys_unm1_slots_ = {
                     mgr_.get_required_field_ptr<double>("phys_unm1_rho"),
                     mgr_.get_required_field_ptr<double>("phys_unm1_rhou"),
@@ -485,28 +477,26 @@ private:
         }
     }
 
-    /** @brief Conservative view of the current primary state (5 mean-flow vars). */
-    [[nodiscard]] fields::ConservativeView<double> u_view() const noexcept {
-        return {u_slots_[0], u_slots_[1], u_slots_[2], u_slots_[3], u_slots_[4]};
-    }
-
     void register_halo_payloads() {
-        // Mean-flow primitives join the aggregated fields phase
         std::array<double*, 5> q_fields = {
-            q_view_.prs, q_view_.vx, q_view_.vy, q_view_.vz, q_view_.tmp
+            q_slots_[0], q_slots_[1], q_slots_[2], q_slots_[3], q_slots_[4]
         };
         halo_.register_cell_fields(q_fields);
 
-        // Mean-flow gradients + limiters join the aggregated gradient phase
         if constexpr (kNeedsGradients) {
-            std::array<double*, 5> grad_bases = {
-                grad_view_.prs_grad, grad_view_.vx_grad, grad_view_.vy_grad,
-                grad_view_.vz_grad, grad_view_.tmp_grad
+            std::array<double*, 5> grad_bases_x = {
+                gx_slots_[0], gx_slots_[1], gx_slots_[2], gx_slots_[3], gx_slots_[4]
+            };
+            std::array<double*, 5> grad_bases_y = {
+                gy_slots_[0], gy_slots_[1], gy_slots_[2], gy_slots_[3], gy_slots_[4]
+            };
+            std::array<double*, 5> grad_bases_z = {
+                gz_slots_[0], gz_slots_[1], gz_slots_[2], gz_slots_[3], gz_slots_[4]
             };
             std::array<double*, 5> lims = {
-                phi_view_.prs, phi_view_.vx, phi_view_.vy, phi_view_.vz, phi_view_.tmp
+                phi_slots_[0], phi_slots_[1], phi_slots_[2], phi_slots_[3], phi_slots_[4]
             };
-            halo_.register_grad_limiters(grad_bases, grad_view_.stride, lims);
+            halo_.register_grad_limiters(grad_bases_x, grad_bases_y, grad_bases_z, lims);
         }
     }
 
@@ -520,14 +510,13 @@ private:
                                           cfg_.init_p,
                                           U);
 
-        auto u = u_view();
         const std::size_t n_total = mgr_.get_field_size("rho");
         for (std::size_t c = 0; c < n_total; ++c) {
-            u.rho[c]  = U[0];
-            u.rhou[c] = U[1];
-            u.rhov[c] = U[2];
-            u.rhow[c] = U[3];
-            u.rhoE[c] = U[4];
+            u_slots_[0][c] = U[0];
+            u_slots_[1][c] = U[1];
+            u_slots_[2][c] = U[2];
+            u_slots_[3][c] = U[3];
+            u_slots_[4][c] = U[4];
 
             if constexpr (TimeMode::kIsUnsteady) {
                 phys_un_slots_[0][c] = U[0];
@@ -617,13 +606,8 @@ private:
         for (long long iter = 1; iter <= cfg_.max_iterations; ++iter) {
             last_iter = iter;
 
-            // --- One full time step (all update blocks) ---
             time_.advance(*this);
 
-            // --- Diagnostics & convergence ---
-            // The global L2 reduction runs only every residual_interval
-            // iterations (plus the first and the last): per-iteration
-            // collectives would cap strong scaling at high rank counts.
             const bool diagnose = iter == 1
                                || iter % cfg_.residual_interval == 0
                                || iter == cfg_.max_iterations;
@@ -695,13 +679,9 @@ private:
                 last_subiter = subiter;
                 time_.advance(*this);
                 
-                // --- Diagnostics & convergence ---
-                // The global L2 reduction runs only every 10
-                // iterations (plus the first and the last): per-iteration
-                // collectives would cap strong scaling at high rank counts.
                 const bool diagnose = subiter == 1
-                                    || subiter % 5 == 0
-                                    || subiter == cfg_.max_iterations;
+                                   || subiter % 5 == 0
+                                   || subiter == cfg_.max_iterations;
 
                 bool converged = false;
                 double rel = 1.0;
@@ -739,15 +719,15 @@ private:
             }
 
             mpi::log_info("Time step %lld/%lld: t = %.5e s | subiters: %lld/%lld (%s)", 
-                      static_cast<long long>(phys_step), static_cast<long long>(cfg_.max_time_steps),
-                      t_phys, 
-                      static_cast<long long>(last_subiter), static_cast<long long>(cfg_.max_iterations),
-                      sub_converged ? "converged" : "limit reached");
+                          static_cast<long long>(phys_step), static_cast<long long>(cfg_.max_time_steps),
+                          t_phys, 
+                          static_cast<long long>(last_subiter), static_cast<long long>(cfg_.max_iterations),
+                          sub_converged ? "converged" : "limit reached");
         }
 
         write_fields(make_stem("final", cfg_.max_time_steps));
         mpi::log_info("solver: unsteady calculation finished in %lld steps, wall time %.3f s",
-                    static_cast<long long>(cfg_.max_time_steps), MPI_Wtime() - wall0);
+                      static_cast<long long>(cfg_.max_time_steps), MPI_Wtime() - wall0);
         return 0;
     }
 
@@ -757,12 +737,11 @@ private:
         std::array<double, PhysPolicy::kNumVars> local{};
         const std::size_t n_own = static_cast<std::size_t>(mesh_.n_own);
 
-        for (std::size_t c = 0; c < n_own; ++c) {
-            local[0] += res_view_.res1[c] * res_view_.res1[c];
-            local[1] += res_view_.res2[c] * res_view_.res2[c];
-            local[2] += res_view_.res3[c] * res_view_.res3[c];
-            local[3] += res_view_.res4[c] * res_view_.res4[c];
-            local[4] += res_view_.res5[c] * res_view_.res5[c];
+        for (std::size_t v = 0; v < PhysPolicy::kNumVars; ++v) {
+            const double* CFD_RESTRICT res_v = res_slots_[v];
+            for (std::size_t c = 0; c < n_own; ++c) {
+                local[v] += res_v[c] * res_v[c];
+            }
         }
 
         MPI_Allreduce(local.data(), l2.data(), PhysPolicy::kNumVars, MPI_DOUBLE, MPI_SUM, comm_);
@@ -798,29 +777,37 @@ private:
 
     void refresh_primitives_for_audit() {
         const std::size_t n_own = static_cast<std::size_t>(mesh_.n_own);
-        auto u = u_view();
+        const double* CFD_RESTRICT u0 = u_slots_[0];
+        const double* CFD_RESTRICT u1 = u_slots_[1];
+        const double* CFD_RESTRICT u2 = u_slots_[2];
+        const double* CFD_RESTRICT u3 = u_slots_[3];
+        const double* CFD_RESTRICT u4 = u_slots_[4];
+
+        double* CFD_RESTRICT q_p = q_slots_[0];
+        double* CFD_RESTRICT q_u = q_slots_[1];
+        double* CFD_RESTRICT q_v = q_slots_[2];
+        double* CFD_RESTRICT q_w = q_slots_[3];
+        double* CFD_RESTRICT q_T = q_slots_[4];
 
         for (std::size_t c = 0; c < n_own; ++c) {
-            const double U_c[PhysPolicy::kNumVars] = {
-                u.rho[c], u.rhou[c], u.rhov[c], u.rhow[c], u.rhoE[c]
-            };
-            eos::conserved_to_primitives_pT(eos_, U_c,
-                                            q_view_.prs[c], q_view_.vx[c],
-                                            q_view_.vy[c], q_view_.vz[c],
-                                            q_view_.tmp[c]);
+            const double U_c[PhysPolicy::kNumVars] = {u0[c], u1[c], u2[c], u3[c], u4[c]};
+            eos::conserved_to_primitives_pT(eos_, U_c, q_p[c], q_u[c], q_v[c], q_w[c], q_T[c]);
         }
+        
         halo_.exchange_fields();
-        bcs_.apply_all(q_view_, mesh_);
+        bcs_.update_ghost_cells(q_slots_, mesh_);
         if constexpr (kHasModules) {
             phys_.apply_bcs(eos_, mesh_);
         }
 
         if constexpr (kNeedsGradients) {
-            grad_mgr_.apply_gradient_set(q_slots_, grad_slots_, grad_stride_, mesh_, aux_conn_);
-            bcs_.apply_grad_all(q_view_.as_const(), grad_view_, mesh_);
+            grad_mgr_.apply_gradient_set(q_const_slots_, gx_slots_, gy_slots_, gz_slots_, mesh_, aux_conn_);
+            bcs_.update_ghost_cells_grad(q_const_slots_, gx_slots_, gy_slots_, gz_slots_, mesh_);
+
             if constexpr (ReconPolicy::kNeedsGradients) {
-                ReconPolicy::compute_limiters(mesh_, aux_conn_, q_view_.as_const(),
-                                              grad_view_.as_const(), phi_view_, cfg_.limiter_venkat_k);
+                ReconPolicy::compute_limiters(mesh_, aux_conn_, q_const_slots_,
+                                              gx_const_slots_, gy_const_slots_, gz_const_slots_,
+                                              phi_slots_, cfg_.limiter_venkat_k);
             }
             if constexpr (kHasModules) {
                 phys_.compute_gradients(grad_mgr_, mesh_);
@@ -833,8 +820,8 @@ private:
         std::vector<double> energy;
 
         refresh_primitives_for_audit();
-        residual_kernel_.boundary_integrals(q_view_.as_const(), grad_view_.as_const(),
-                                   phi_view_.as_const(), mass, energy, mut_ptr());
+        residual_kernel_.boundary_integrals(q_const_slots_, gx_const_slots_, gy_const_slots_, gz_const_slots_,
+                                            phi_const_slots_, mass, energy, mut_ptr());
 
         const auto n = static_cast<int>(mass.size());
         std::vector<double> gmass(static_cast<std::size_t>(n));
@@ -861,11 +848,14 @@ private:
         const auto n_own = static_cast<std::size_t>(mesh_.n_own);
         std::vector<double> rho(n_own), vx(n_own), vy(n_own), vz(n_own), pr(n_own), mach(n_own);
 
-        const auto u = u_view();
+        const double* CFD_RESTRICT u0 = u_slots_[0];
+        const double* CFD_RESTRICT u1 = u_slots_[1];
+        const double* CFD_RESTRICT u2 = u_slots_[2];
+        const double* CFD_RESTRICT u3 = u_slots_[3];
+        const double* CFD_RESTRICT u4 = u_slots_[4];
+
         for (std::size_t c = 0; c < n_own; ++c) {
-            const double U[PhysPolicy::kNumVars] = {
-                u.rho[c], u.rhou[c], u.rhov[c], u.rhow[c], u.rhoE[c]
-            };
+            const double U[PhysPolicy::kNumVars] = {u0[c], u1[c], u2[c], u3[c], u4[c]};
             const double r = U[0];
             const double p = eos::pressure(eos_, U);
             const double a = eos_.sound_speed_rhop(r, p);
@@ -889,7 +879,6 @@ private:
         std::vector<io::vtk::SolutionField> fields(mean_fields,
                                                    mean_fields + sizeof(mean_fields) / sizeof(mean_fields[0]));
 
-        // Module outputs are zero-copy views of live module arrays
         if constexpr (kHasModules) {
             phys_.append_output(fields);
         }
@@ -912,35 +901,33 @@ private:
     bc::BoundaryManager<EOS> bcs_;
     fields::halo::HaloExchanger halo_;
 
-
-
     TimePolicy time_{};
     MPI_Comm comm_{MPI_COMM_WORLD};
 
     numerics::gradient::GradientManager grad_mgr_;
-    std::size_t grad_stride_{0};
 
     fields::FieldsManager mgr_;
-    fields::PrimitiveView<double> q_view_{};
-    fields::ResidualView<double> res_view_{};
-    fields::PrimitiveGradView<double> grad_view_{};
-    fields::PrimitiveView<double> phi_view_{};
 
-    // Update-block slot registry: [variable][role] pointer table
-    std::vector<const double*> q_slots_;
-    std::vector<double*> grad_slots_;
+    // Update-block slot registries: [variable][role]
+    std::vector<double*> q_slots_;
+    std::vector<const double*> q_const_slots_;
+
+    std::vector<double*> gx_slots_, gy_slots_, gz_slots_;
+    std::vector<const double*> gx_const_slots_, gy_const_slots_, gz_const_slots_;
+
+    std::vector<double*> phi_slots_;
+    std::vector<const double*> phi_const_slots_;
+
     std::vector<double*> u_slots_;
     std::vector<double*> phys_un_slots_, phys_unm1_slots_;
     std::size_t bdf_order_cur_ = 1;
-    std::vector<double*> prev_slots_;
     std::vector<double*> stage_slots_;
     std::vector<double*> res_slots_;
 
-
     std::vector<double> lam_;   ///< Per-cell spectral radius [0, n_cells)
     std::vector<double> dt_;    ///< Local time step [0, n_own)
-    std::vector<double> alpha_; ///< dt / Volume [0, n_own)
-    std::vector<double> mdot_;  ///< Face mass flux (module convection) [0, n_faces)
+    std::vector<double> alpha_; ///< CFL diagonal scale [0, n_own)
+    std::vector<double> mdot_;  ///< Face convective mass flux [0, n_faces)
 
     /** @brief Eddy-viscosity data for the viscous sweep (nullptr w/o modules). */
     [[nodiscard]] const double* mut_ptr() const noexcept {

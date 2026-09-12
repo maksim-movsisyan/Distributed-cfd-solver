@@ -56,7 +56,6 @@ enum class FluxType {
 
 enum class TimeScheme {
     ForwardEuler,
-    SspRk3,
     BackwardEuler,
 };
 
@@ -120,7 +119,7 @@ struct SolverConfig {
     TurbulenceConfig turbulence;
 
     // [time]
-    TimeScheme scheme = TimeScheme::SspRk3;
+    TimeScheme scheme = TimeScheme::ForwardEuler;
     double cfl = 0.4;
     std::int64_t max_iterations = 10000;
     double residual_tolerance = 1.0e-10; // relative L2 drop

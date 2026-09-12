@@ -4,7 +4,6 @@
 #include <vector>
 #include <span>
 
-#include "cfd/core/types.hpp"
 #include "cfd/mesh/localmesh.hpp"
 #include "cfd/mesh/aux_connectivity.hpp"
 
@@ -24,15 +23,22 @@ public:
     /**
      * @brief Evaluates spatial gradient for a single scalar field on owned cells [0, n_own).
      * @param[in]  s      Scalar field of size mesh.n_cells (halo-complete).
-     * @param[out] g      Flat SoA gradient: [d/dx (stride) | d/dy (stride) | d/dz (stride)].
-     * @param[in]  stride
+     * @param[out] g_xyz  SoA gradient: [d/dx | d/dy | d/dz ] of size mesh.n_cells.
      * @param[in]  m      Migrated local mesh partition.
      */
-    virtual void apply(const double* const CFD_RESTRICT s, double* const CFD_RESTRICT g, const std::size_t stride,
-                       const mesh::MeshPart& mesh, const mesh::MeshAuxConnectivity& aux_conn) const = 0;
+    virtual void apply(const double* CFD_RESTRICT s,
+                       double* CFD_RESTRICT gx,
+                       double* CFD_RESTRICT gy,
+                       double* CFD_RESTRICT gz,
+                       const mesh::MeshPart& mesh,
+                       const mesh::MeshAuxConnectivity& aux_conn) const = 0;
     
-    virtual void apply_set(std::span<const double*> s, std::span<double*> g, const std::size_t stride,
-                           const mesh::MeshPart& mesh, const mesh::MeshAuxConnectivity& aux_conn) const = 0;
+    virtual void apply_set(std::span<const double* const> s,
+                           std::span<double* const> gx,
+                           std::span<double* const> gy,
+                           std::span<double* const> gz,
+                           const mesh::MeshPart& mesh,
+                           const mesh::MeshAuxConnectivity& aux_conn) const = 0;
 
     [[nodiscard]] virtual const char* name() const noexcept = 0;
 };
@@ -45,10 +51,18 @@ public:
 class GreenGaussCellGradient : public GradientOperator {
 public:
     void setup(const mesh::MeshPart& mesh, mesh::MeshAuxConnectivity& aux_conn) override;
-    void apply(const double* const CFD_RESTRICT s, double* const CFD_RESTRICT g, const std::size_t stride,
-               const mesh::MeshPart& mesh, const mesh::MeshAuxConnectivity& aux_conn) const override;
-    void apply_set(std::span<const double*> s, std::span<double*> g, const std::size_t stride,
-                   const mesh::MeshPart& mesh, const mesh::MeshAuxConnectivity& aux_conn) const override;
+    void apply(const double* CFD_RESTRICT s,
+               double* CFD_RESTRICT gx,
+               double* CFD_RESTRICT gy,
+               double* CFD_RESTRICT gz,
+               const mesh::MeshPart& mesh,
+               const mesh::MeshAuxConnectivity& aux_conn) const override;
+    void apply_set(std::span<const double* const> s,
+                   std::span<double* const> gx,
+                   std::span<double* const> gy,
+                   std::span<double* const> gz,
+                   const mesh::MeshPart& mesh,
+                   const mesh::MeshAuxConnectivity& aux_conn) const override;
     [[nodiscard]] const char* name() const noexcept override { return "GREEN_GAUSS_CELL"; }
 };
 
@@ -60,10 +74,18 @@ public:
 class GreenGaussFaceGradient : public GradientOperator {
 public:
     void setup(const mesh::MeshPart& /*mesh*/, mesh::MeshAuxConnectivity& /*aux_conn*/) override;
-    void apply(const double* const CFD_RESTRICT s, double* const CFD_RESTRICT g, const std::size_t stride,
-               const mesh::MeshPart& mesh, const mesh::MeshAuxConnectivity& /*aux_conn*/) const override;
-    void apply_set(std::span<const double*> s, std::span<double*> g, const std::size_t stride,
-                   const mesh::MeshPart& mesh, const mesh::MeshAuxConnectivity& /*aux_conn*/) const override;
+    void apply(const double* CFD_RESTRICT s,
+               double* CFD_RESTRICT gx,
+               double* CFD_RESTRICT gy,
+               double* CFD_RESTRICT gz,
+               const mesh::MeshPart& mesh,
+               const mesh::MeshAuxConnectivity& aux_conn) const override;
+    void apply_set(std::span<const double* const> s,
+                   std::span<double* const> gx,
+                   std::span<double* const> gy,
+                   std::span<double* const> gz,
+                   const mesh::MeshPart& mesh,
+                   const mesh::MeshAuxConnectivity& aux_conn) const override;
     [[nodiscard]] const char* name() const noexcept override { return "GREEN_GAUSS_FACE"; }
 };
 
@@ -75,11 +97,18 @@ public:
 class LeastSquaresCellFaceGradient : public GradientOperator {
 public:
     void setup(const mesh::MeshPart& mesh, mesh::MeshAuxConnectivity& aux_conn) override;
-    void apply(const double* const CFD_RESTRICT s, double* const CFD_RESTRICT g, const std::size_t stride,
-               const mesh::MeshPart& mesh, const mesh::MeshAuxConnectivity& aux_conn) const override;
-    void apply_set(std::span<const double*> s, std::span<double*> g, const std::size_t stride,
-                   const mesh::MeshPart& mesh, const mesh::MeshAuxConnectivity& aux_conn) const override;
-
+    void apply(const double* CFD_RESTRICT s,
+               double* CFD_RESTRICT gx,
+               double* CFD_RESTRICT gy,
+               double* CFD_RESTRICT gz,
+               const mesh::MeshPart& mesh,
+               const mesh::MeshAuxConnectivity& aux_conn) const override;
+    void apply_set(std::span<const double* const> s,
+                   std::span<double* const> gx,
+                   std::span<double* const> gy,
+                   std::span<double* const> gz,
+                   const mesh::MeshPart& mesh,
+                   const mesh::MeshAuxConnectivity& aux_conn) const override;
     [[nodiscard]] const char* name() const noexcept override { return "LEAST_SQUARES_FACE"; }
 
 private:
@@ -99,11 +128,18 @@ private:
 class LeastSquaresCellNodeGradient : public GradientOperator {
 public:
     void setup(const mesh::MeshPart& mesh, mesh::MeshAuxConnectivity& aux_conn) override;
-    void apply(const double* const CFD_RESTRICT s, double* const CFD_RESTRICT g, const std::size_t stride,
-               const mesh::MeshPart& mesh, const mesh::MeshAuxConnectivity& aux_conn) const override;
-    void apply_set(std::span<const double*> s, std::span<double*> g, const std::size_t stride,
-                   const mesh::MeshPart& mesh, const mesh::MeshAuxConnectivity& aux_conn) const override;
-
+    void apply(const double* CFD_RESTRICT s,
+               double* CFD_RESTRICT gx,
+               double* CFD_RESTRICT gy,
+               double* CFD_RESTRICT gz,
+               const mesh::MeshPart& mesh,
+               const mesh::MeshAuxConnectivity& aux_conn) const override;
+    void apply_set(std::span<const double* const> s,
+                   std::span<double* const> gx,
+                   std::span<double* const> gy,
+                   std::span<double* const> gz,
+                   const mesh::MeshPart& mesh,
+                   const mesh::MeshAuxConnectivity& aux_conn) const override;
     [[nodiscard]] const char* name() const noexcept override { return "LEAST_SQUARES_NODE"; }
 
 private:

@@ -38,12 +38,12 @@ public:
 
     /**
      * @brief Registers gradient components (3 planes per var) and limiter arrays.
-     * @param grad_bases   Base pointers for each variable (dx is at base, dy at base + stride, dz at base + 2*stride).
-     * @param plane_stride Stride between gradient planes in doubles (usually allocated cell count).
+     * @param grad_bases_xyz   Base pointers for each variable.
      * @param limiters     Optional limiter field pointers (1 double per cell). Can be empty.
      */
-    void register_grad_limiters(std::span<double* const> grad_bases,
-                                std::size_t plane_stride,
+    void register_grad_limiters(std::span<double* const> grad_bases_x,
+                                std::span<double* const> grad_bases_y,
+                                std::span<double* const> grad_bases_z,
                                 std::span<double* const> limiters);
 
     // --- Primary Fields Communication Phase ----------------------------------

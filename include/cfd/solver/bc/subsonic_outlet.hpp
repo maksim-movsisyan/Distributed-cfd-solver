@@ -1,6 +1,9 @@
 #pragma once
 
+#include <algorithm>
+#include <cassert>
 #include <cstddef>
+#include <span>
 #include <string>
 #include <utility>
 
@@ -9,13 +12,12 @@
 #include "cfd/solver/bc/bc.hpp"
 #include "cfd/solver/bc/bc_fill_gradients.hpp"
 #include "cfd/solver/bc/bc_fill_values.hpp"
-#include "cfd/solver/eos/eos_concept.hpp"
-#include "cfd/fields/fields_view.hpp"
+#include "cfd/solver/eos/concepts.hpp"
 
 namespace cfd::solver::bc {
 
 /** 
- * @brief Parameters for Subsonic Outlet (backpressure).
+ * @brief Parameters for Subsonic Outlet (imposed static backpressure).
  */
 struct SubsonicOutletParams {
     double prs_outlet{101325.0}; ///< Target static backpressure p_back [Pa]
@@ -25,8 +27,10 @@ struct SubsonicOutletParams {
     }
 };
 
-/** @brief Set value in ghost cell for Subsonic Outlet */
-inline void subsonic_outlet_kernel(fields::PrimitiveView<double> s,
+namespace {
+
+/** @brief Fills ghost cells with state values for Subsonic Outlet */
+inline void subsonic_outlet_kernel(std::span<double* const> q,
                                    const mesh::MeshPart& m,
                                    const LocalIndex fbeg,
                                    const LocalIndex fend,
@@ -42,31 +46,43 @@ inline void subsonic_outlet_kernel(fields::PrimitiveView<double> s,
     // Unpack topology array with restrict
     const LocalIndex* CFD_RESTRICT face_owner = m.face_owner.data();
 
+    // Cache primitive field pointers
+    double* CFD_RESTRICT prs = q[0];
+    double* CFD_RESTRICT vx  = q[1];
+    double* CFD_RESTRICT vy  = q[2];
+    double* CFD_RESTRICT vz  = q[3];
+    double* CFD_RESTRICT tmp = q[4];
+
     // Cache outlet backpressure in register
     const double prs_outlet = p.prs_outlet;
 
     for (std::size_t face_idx = beg; face_idx < end; ++face_idx) {
-        const auto in = static_cast<std::size_t>(face_owner[face_idx]); // inner (real) cell
-        const auto gh = n_cells + f_loc;                                  // ghost cell
+        const auto in = static_cast<std::size_t>(face_owner[face_idx]);
+        const auto gh = n_cells + f_loc;
 
-        // ==== 1. Fixed Dirichlet static backpressure: p_face = p_outlet ====
-        apply_fixed_value_bc(s.prs[gh], s.prs[in], prs_outlet);
+        // 1. Fixed Dirichlet static backpressure: p_face = p_outlet
+        apply_fixed_value_bc(prs[gh], prs[in], prs_outlet);
 
-        // ==== 2. Extrapolate velocity components from interior (Neumann: dv/dn = 0) ====
-        apply_extrapolation0_bc(s.vx[gh], s.vx[in]);
-        apply_extrapolation0_bc(s.vy[gh], s.vy[in]);
-        apply_extrapolation0_bc(s.vz[gh], s.vz[in]);
+        // Physical lower bound guard against negative pressure
+        prs[gh] = std::max(prs[gh], 1.0);
 
-        // ==== 3. Extrapolate temperature from interior (Neumann: dT/dn = 0) ====
-        apply_extrapolation0_bc(s.tmp[gh], s.tmp[in]);
+        // 2. Extrapolate velocity components from interior (Neumann: dv/dn = 0)
+        apply_extrapolation0_bc(vx[gh], vx[in]);
+        apply_extrapolation0_bc(vy[gh], vy[in]);
+        apply_extrapolation0_bc(vz[gh], vz[in]);
+
+        // 3. Extrapolate temperature from interior (Neumann: dT/dn = 0)
+        apply_extrapolation0_bc(tmp[gh], tmp[in]);
 
         ++f_loc;
     }
 }
 
-/** @brief Set gradient in ghost cell for Subsonic Outlet */
-inline void subsonic_outlet_grad_kernel(fields::ConstPrimitiveView s,
-                                        fields::PrimitiveGradView<double> s_grad,
+/** @brief Fills ghost cells with gradients for Subsonic Outlet */
+inline void subsonic_outlet_grad_kernel(std::span<const double* const> q,
+                                        std::span<double* const> gx,
+                                        std::span<double* const> gy,
+                                        std::span<double* const> gz,
                                         const mesh::MeshPart& m,
                                         const LocalIndex fbeg,
                                         const LocalIndex fend,
@@ -93,7 +109,6 @@ inline void subsonic_outlet_grad_kernel(fields::ConstPrimitiveView s,
     const double* CFD_RESTRICT ccy_ptr = m.cell_centroid_y.data();
     const double* CFD_RESTRICT ccz_ptr = m.cell_centroid_z.data();
 
-    // Cache outlet backpressure in register
     const double prs_outlet = p.prs_outlet;
 
     for (std::size_t face_idx = beg; face_idx < end; ++face_idx) {
@@ -117,40 +132,31 @@ inline void subsonic_outlet_grad_kernel(fields::ConstPrimitiveView s,
         const double rcfz = fcz - ccz;
 
         const double rcfn = rcfx * nx + rcfy * ny + rcfz * nz;
-        const double rcfn_inv = 1.0 / rcfn;
+        const double rcfn_inv = 1.0 / std::max(rcfn, 1.0e-14);
 
-        // ==== 1. Fixed value pressure gradient ====
-        const double gx_in = s_grad.dprs_dx(in);
-        const double gy_in = s_grad.dprs_dy(in);
-        const double gz_in = s_grad.dprs_dz(in);
-
-        apply_grad_fixed_value_bc(s_grad.dprs_dx(gh), s_grad.dprs_dy(gh), s_grad.dprs_dz(gh),
-                                  gx_in, gy_in, gz_in, s.prs[in], prs_outlet,
+        // 1. Fixed value pressure gradient
+        apply_grad_fixed_value_bc(gx[0][gh], gy[0][gh], gz[0][gh],
+                                  gx[0][in], gy[0][in], gz[0][in],
+                                  q[0][in], prs_outlet,
                                   nx, ny, nz, rcfn_inv);
 
-        // ==== 2. Extrapolate velocity gradients ====
-        apply_grad_extrapolation0_bc(s_grad.dvx_dx(gh), s_grad.dvx_dy(gh), s_grad.dvx_dz(gh),
-                                     s_grad.dvx_dx(in), s_grad.dvx_dy(in), s_grad.dvx_dz(in));
-
-        apply_grad_extrapolation0_bc(s_grad.dvy_dx(gh), s_grad.dvy_dy(gh), s_grad.dvy_dz(gh),
-                                     s_grad.dvy_dx(in), s_grad.dvy_dy(in), s_grad.dvy_dz(in));
-
-        apply_grad_extrapolation0_bc(s_grad.dvz_dx(gh), s_grad.dvz_dy(gh), s_grad.dvz_dz(gh),
-                                     s_grad.dvz_dx(in), s_grad.dvz_dy(in), s_grad.dvz_dz(in));
-
-        // ==== 3. Extrapolate temperature gradient ====
-        apply_grad_extrapolation0_bc(s_grad.dtmp_dx(gh), s_grad.dtmp_dy(gh), s_grad.dtmp_dz(gh),
-                                     s_grad.dtmp_dx(in), s_grad.dtmp_dy(in), s_grad.dtmp_dz(in));
+        // 2. Extrapolate velocity (1..3) and temperature (4) gradients (Neumann: d(grad)/dn = 0)
+        for (std::size_t v = 1; v < 5; ++v) {
+            apply_grad_extrapolation0_bc(gx[v][gh], gy[v][gh], gz[v][gh],
+                                         gx[v][in], gy[v][in], gz[v][in]);
+        }
 
         ++f_loc;
     }
 }
 
+} // anonymous namespace
+
 /**
  * @class SubsonicOutletBC
  * @brief Subsonic Outlet boundary condition with imposed static backpressure.
  */
-template <eos::EquationOfState EOS>
+template <solver::eos::EquationOfStatePolicy EOS>
 class SubsonicOutletBC final : public BoundaryCondition<EOS> {
 public:
     SubsonicOutletBC(std::string zone,
@@ -160,16 +166,20 @@ public:
         : BoundaryCondition<EOS>(std::move(zone), fbeg, fend),
           m_p(p) {}
 
-    void apply(fields::PrimitiveView<double> state,
-               const mesh::MeshPart& mesh,
-               const EOS& /*eos*/) const override {
-        subsonic_outlet_kernel(state, mesh, this->m_begin, this->m_end, m_p);
+    void update_ghost_cells(std::span<double* const> q,
+                            const mesh::MeshPart& mesh,
+                            const EOS& /*eos*/) const override {
+        assert(q.size() == 5 && "SubsonicOutletBC requires exactly 5 mean-flow variables");
+        subsonic_outlet_kernel(q, mesh, this->m_begin, this->m_end, m_p);
     }
 
-    void apply_grad(fields::ConstPrimitiveView state,
-                    fields::PrimitiveGradView<double> state_grad,
-                    const mesh::MeshPart& mesh) const override {
-        subsonic_outlet_grad_kernel(state, state_grad, mesh, this->m_begin, this->m_end, m_p);
+    void update_ghost_cells_grad(std::span<const double* const> q,
+                                 std::span<double* const> gx,
+                                 std::span<double* const> gy,
+                                 std::span<double* const> gz,
+                                 const mesh::MeshPart& mesh) const override {
+        assert(q.size() == 5 && gx.size() == 5 && gy.size() == 5 && gz.size() == 5);
+        subsonic_outlet_grad_kernel(q, gx, gy, gz, mesh, this->m_begin, this->m_end, m_p);
     }
 
     [[nodiscard]] BCType kind() const noexcept override { return BCType::SubsonicOutlet; }

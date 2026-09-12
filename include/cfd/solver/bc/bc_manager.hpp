@@ -1,7 +1,9 @@
 #pragma once
 
+#include <cassert>
 #include <functional>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -12,27 +14,27 @@
 #include "cfd/mesh/localmesh.hpp"
 #include "cfd/mpi/log.hpp"
 #include "cfd/solver/bc/bc.hpp"
+#include "cfd/solver/bc/config.hpp"
 #include "cfd/solver/bc/farfield.hpp"
+#include "cfd/solver/bc/noslip_wall.hpp"
+#include "cfd/solver/bc/noslip_wall_heat_flux.hpp"
 #include "cfd/solver/bc/slip_wall.hpp"
+#include "cfd/solver/bc/subsonic_inlet.hpp"
+#include "cfd/solver/bc/subsonic_outlet.hpp"
 #include "cfd/solver/bc/supersonic_inlet.hpp"
 #include "cfd/solver/bc/supersonic_outlet.hpp"
 #include "cfd/solver/bc/symmetry.hpp"
-#include "cfd/solver/bc/noslip_wall.hpp"
-#include "cfd/solver/bc/noslip_wall_heat_flux.hpp"
-#include "cfd/solver/bc/subsonic_inlet.hpp"
-#include "cfd/solver/bc/subsonic_outlet.hpp"
-#include "cfd/solver/bc/config.hpp"
-#include "cfd/solver/eos/eos_concept.hpp"
-#include "cfd/fields/fields_view.hpp"
+#include "cfd/solver/eos/concepts.hpp"
 
 namespace cfd::solver::bc {
+
 /**
  * @class BoundaryManager
  * @brief Owns all boundary condition patch objects and coordinates ghost cell filling.
  * 
- * @tparam EOS Thermodynamic Equation of State conforming to eos::EquationOfState.
+ * @tparam EOS Thermodynamic Equation of State conforming to physics::eos::EquationOfStatePolicy.
  */
- template <eos::EquationOfState EOS>
+template <eos::EquationOfStatePolicy EOS>
 class BoundaryManager {
 public:
     using BCPtr = std::unique_ptr<BoundaryCondition<EOS>>;
@@ -49,7 +51,7 @@ public:
      * 
      * @param bc_config Parsed boundary configuration.
      * @param mesh      Local partitioned mesh.
-     * @param eos       Thermodynamic equation of state.
+     * @param eos       Thermodynamic equation of state model.
      */
     void initialize(const BoundaryConfig& bc_config,
                     const mesh::MeshPart& mesh,
@@ -57,14 +59,14 @@ public:
         m_eos = eos;
         m_bcs.clear();
 
-        // 1. Create zone ranges: patch_id -> [start_face, end_face)
+        // 1. Map patch_id to boundary face ranges: patch_id -> [start_face, end_face)
         const auto ranges = build_zone_ranges(mesh);
 
         // 2. Instantiate boundary conditions for local patches
         for (const auto& patch : bc_config.patches) {
             const auto it_range = ranges.find(static_cast<LocalIndex>(patch.patch_id));
 
-            // If this MPI rank has no boundary faces belonging to this patch, skip cleanly
+            // Skip patch if this rank contains no boundary faces belonging to it
             if (it_range == ranges.end()) {
                 continue;
             }
@@ -86,22 +88,33 @@ public:
 
     /**
      * @brief Fills ghost cell primitive states for all local boundary patches.
+     * @param[in,out] q Span of SoA pointers to mean-flow primitive variables [p, u, v, w, T].
+     * @param[in] mesh Local partitioned mesh.
      */
-    void apply_all(fields::PrimitiveView<double> state,
-                   const mesh::MeshPart& mesh) const {
+    void update_ghost_cells(std::span<double* const> q,
+                            const mesh::MeshPart& mesh) const {
+        assert(q.size() == 5 && "BoundaryManager::update_ghost_cells requires exactly 5 mean-flow variables");
         for (const auto& bc : m_bcs) {
-            bc->apply(state, mesh, m_eos);
+            bc->update_ghost_cells(q, mesh, m_eos);
         }
     }
 
     /**
-     * @brief Fills ghost cell gradients for all local boundary patches (2nd-order reconstruction).
+     * @brief Fills ghost cell gradients for all local boundary patches.
+     * @param[in] q Span of SoA pointers to primitive variables.
+     * @param[in,out] gx Span of SoA pointers to x-gradients.
+     * @param[in,out] gy Span of SoA pointers to y-gradients.
+     * @param[in,out] gz Span of SoA pointers to z-gradients.
+     * @param[in] mesh Local partitioned mesh.
      */
-    void apply_grad_all(fields::ConstPrimitiveView state,
-                        fields::PrimitiveGradView<double> state_grad,
-                        const mesh::MeshPart& mesh) const {
+    void update_ghost_cells_grad(std::span<const double* const> q,
+                                 std::span<double* const> gx,
+                                 std::span<double* const> gy,
+                                 std::span<double* const> gz,
+                                 const mesh::MeshPart& mesh) const {
+        assert(q.size() == 5 && gx.size() == 5 && gy.size() == 5 && gz.size() == 5);
         for (const auto& bc : m_bcs) {
-            bc->apply_grad(state, state_grad, mesh);
+            bc->update_ghost_cells_grad(q, gx, gy, gz, mesh);
         }
     }
 
@@ -120,7 +133,7 @@ private:
         // ==== Supersonic Inlet ====
         m_registry[BCType::SupersonicInlet] =
             [](const std::string& z, const LocalIndex b, const LocalIndex e,
-            const BCDescriptor& desc, const EOS& eos) -> BCPtr {
+               const BCDescriptor& desc, const EOS& eos) -> BCPtr {
                 SupersonicInletParams par;
 
                 switch (desc.inflow_mode) {
@@ -185,7 +198,7 @@ private:
         // ==== Farfield (Riemann Invariants) ====
         m_registry[BCType::Farfield] =
             [](const std::string& z, const LocalIndex b, const LocalIndex e,
-            const BCDescriptor& desc, const EOS& eos) -> BCPtr {
+               const BCDescriptor& desc, const EOS& eos) -> BCPtr {
                 FarfieldParams par;
 
                 switch (desc.inflow_mode) {
@@ -227,10 +240,10 @@ private:
                 return std::make_unique<FarfieldBC<EOS>>(z, b, e, par);
             };
 
-        // ==== Noslip wall (isothermal) ====
+        // ==== No-slip Wall (Isothermal) ====
         m_registry[BCType::NoSlipWall] =
             [](const std::string& z, const LocalIndex b, const LocalIndex e,
-            const BCDescriptor& desc, const EOS& /*eos*/) -> BCPtr {
+               const BCDescriptor& desc, const EOS& /*eos*/) -> BCPtr {
                 const auto par = NoSlipWallParams::moving_isothermal(
                     desc.velocity[0],
                     desc.velocity[1],
@@ -240,10 +253,10 @@ private:
                 return std::make_unique<NoSlipWallBC<EOS>>(z, b, e, par);
             };
 
-        // ==== Noslip wall (fixed temperature gradient) ====
+        // ==== No-slip Wall (Fixed Temperature Gradient / Heat Flux) ====
         m_registry[BCType::NoSlipWallHeatFlux] =
             [](const std::string& z, const LocalIndex b, const LocalIndex e,
-            const BCDescriptor& desc, const EOS& /*eos*/) -> BCPtr {
+               const BCDescriptor& desc, const EOS& /*eos*/) -> BCPtr {
                 const auto par = NoSlipWallHeatFluxParams::moving_gradient(
                     desc.velocity[0],
                     desc.velocity[1],
@@ -253,10 +266,10 @@ private:
                 return std::make_unique<NoSlipWallHeatFluxBC<EOS>>(z, b, e, par);
             };
         
-        // ==== Subsonic inlet ====
+        // ==== Subsonic Inlet ====
         m_registry[BCType::SubsonicInlet] =
             [](const std::string& z, const LocalIndex b, const LocalIndex e,
-            const BCDescriptor& desc, const EOS& eos) -> BCPtr {
+               const BCDescriptor& desc, const EOS& eos) -> BCPtr {
                 SubsonicInletParams par;
 
                 switch (desc.inflow_mode) {
@@ -294,10 +307,10 @@ private:
                 return std::make_unique<SubsonicInletBC<EOS>>(z, b, e, par);
             };
 
-        // ==== Subsonic outlet ====
+        // ==== Subsonic Outlet ====
         m_registry[BCType::SubsonicOutlet] =
             [](const std::string& z, const LocalIndex b, const LocalIndex e,
-            const BCDescriptor& desc, const EOS& /*eos*/) -> BCPtr {
+               const BCDescriptor& desc, const EOS& /*eos*/) -> BCPtr {
                 const auto par = SubsonicOutletParams::from_pressure(desc.p);
                 return std::make_unique<SubsonicOutletBC<EOS>>(z, b, e, par);
             };

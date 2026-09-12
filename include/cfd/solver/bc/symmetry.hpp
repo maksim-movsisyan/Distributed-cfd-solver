@@ -1,6 +1,9 @@
 #pragma once
 
+#include <algorithm>
+#include <cassert>
 #include <cstddef>
+#include <span>
 #include <string>
 #include <utility>
 
@@ -9,13 +12,14 @@
 #include "cfd/solver/bc/bc.hpp"
 #include "cfd/solver/bc/bc_fill_gradients.hpp"
 #include "cfd/solver/bc/bc_fill_values.hpp"
-#include "cfd/solver/eos/eos_concept.hpp"
-#include "cfd/fields/fields_view.hpp"
+#include "cfd/solver/eos/concepts.hpp"
 
 namespace cfd::solver::bc {
 
-/** @brief Set value in ghost cell for symmetry plane boundary */
-inline void symmetry_kernel(fields::PrimitiveView<double> s,
+namespace {
+
+/** @brief Fills ghost cells with state values for Symmetry plane boundary */
+inline void symmetry_kernel(std::span<double* const> q,
                             const mesh::MeshPart& m,
                             const LocalIndex fbeg,
                             const LocalIndex fend) noexcept {
@@ -33,31 +37,39 @@ inline void symmetry_kernel(fields::PrimitiveView<double> s,
     const double* CFD_RESTRICT ny_ptr         = m.face_normal_y.data();
     const double* CFD_RESTRICT nz_ptr         = m.face_normal_z.data();
 
-    for (std::size_t face_idx = beg; face_idx < end; ++face_idx) {
-        const auto in = static_cast<std::size_t>(face_owner[face_idx]); // inner (real) cell
-        const auto gh = n_cells + f_loc;                                  // ghost cell = n_cells + local boundary face idx
+    // Cache primitive field pointers
+    double* CFD_RESTRICT prs = q[0];
+    double* CFD_RESTRICT vx  = q[1];
+    double* CFD_RESTRICT vy  = q[2];
+    double* CFD_RESTRICT vz  = q[3];
+    double* CFD_RESTRICT tmp = q[4];
 
-        // ==== unit normal ====
+    for (std::size_t face_idx = beg; face_idx < end; ++face_idx) {
+        const auto in = static_cast<std::size_t>(face_owner[face_idx]);
+        const auto gh = n_cells + f_loc;
+
         const double nx = nx_ptr[face_idx];
         const double ny = ny_ptr[face_idx];
         const double nz = nz_ptr[face_idx];
 
-        // ==== Reflect velocity vector (Symmetry plane: u_n = 0) ====
-        apply_slip_component_bc(s.vx[gh], s.vy[gh], s.vz[gh],
-                                s.vx[in], s.vy[in], s.vz[in],
+        // 1. Reflect velocity vector across symmetry plane (u_n = 0)
+        apply_slip_component_bc(vx[gh], vy[gh], vz[gh],
+                                vx[in], vy[in], vz[in],
                                 nx, ny, nz);
 
-        // ==== Extrapolate scalars from inner cell (dp/dn = 0, dT/dn = 0) ====
-        apply_extrapolation0_bc(s.prs[gh], s.prs[in]);
-        apply_extrapolation0_bc(s.tmp[gh], s.tmp[in]);
+        // 2. Extrapolate scalars across symmetry plane (dp/dn = 0, dT/dn = 0)
+        apply_extrapolation0_bc(prs[gh], prs[in]);
+        apply_extrapolation0_bc(tmp[gh], tmp[in]);
 
         ++f_loc;
     }
 }
 
-/** @brief Set gradient in ghost cell for symmetry plane boundary */
-inline void symmetry_grad_kernel(fields::ConstPrimitiveView s,
-                                 fields::PrimitiveGradView<double> s_grad,
+/** @brief Fills ghost cells with gradients for Symmetry plane boundary */
+inline void symmetry_grad_kernel(std::span<const double* const> q,
+                                 std::span<double* const> gx,
+                                 std::span<double* const> gy,
+                                 std::span<double* const> gz,
                                  const mesh::MeshPart& m,
                                  const LocalIndex fbeg,
                                  const LocalIndex fend) noexcept {
@@ -84,82 +96,76 @@ inline void symmetry_grad_kernel(fields::ConstPrimitiveView s,
     const double* CFD_RESTRICT ccz_ptr = m.cell_centroid_z.data();
 
     for (std::size_t face_idx = beg; face_idx < end; ++face_idx) {
-        const auto in = static_cast<std::size_t>(face_owner[face_idx]); // inner (real) cell
-        const auto gh = n_cells + f_loc;                                  // ghost cell = n_cells + local boundary face idx
+        const auto in = static_cast<std::size_t>(face_owner[face_idx]);
+        const auto gh = n_cells + f_loc;
 
-        // ==== unit normal ====
         const double nx = nx_ptr[face_idx];
         const double ny = ny_ptr[face_idx];
         const double nz = nz_ptr[face_idx];
 
-        // ==== face center ====
         const double fcx = fcx_ptr[face_idx];
         const double fcy = fcy_ptr[face_idx];
         const double fcz = fcz_ptr[face_idx];
 
-        // ==== inner cell center ====
         const double ccx = ccx_ptr[in];
         const double ccy = ccy_ptr[in];
         const double ccz = ccz_ptr[in];
 
-        // ==== vector from cell center to face center ====
         const double rcfx = fcx - ccx;
         const double rcfy = fcy - ccy;
         const double rcfz = fcz - ccz;
 
         const double rcfn = rcfx * nx + rcfy * ny + rcfz * nz;
-        const double rcfn_inv = 1.0 / rcfn;
-        double gx_in, gy_in, gz_in;
+        const double rcfn_inv = 1.0 / std::max(rcfn, 1.0e-14);
 
-        // ==== pressure grad (zero normal gradient: dp/dn = 0) ====
-        gx_in = s_grad.dprs_dx(in); gy_in = s_grad.dprs_dy(in); gz_in = s_grad.dprs_dz(in);
-        apply_grad_fixed_gradient_bc(s_grad.dprs_dx(gh), s_grad.dprs_dy(gh), s_grad.dprs_dz(gh),
-                                     gx_in, gy_in, gz_in, 0.0, nx, ny, nz);
+        // 1. Pressure gradient (zero normal gradient: dp/dn = 0)
+        apply_grad_fixed_gradient_bc(gx[0][gh], gy[0][gh], gz[0][gh],
+                                     gx[0][in], gy[0][in], gz[0][in],
+                                     0.0, nx, ny, nz);
 
-        // ==== x-velocity grad ====
-        gx_in = s_grad.dvx_dx(in); gy_in = s_grad.dvx_dy(in); gz_in = s_grad.dvx_dz(in);
-        apply_grad_slip_component_bc(s_grad.dvx_dx(gh), s_grad.dvx_dy(gh), s_grad.dvx_dz(gh),
-                                     gx_in, gy_in, gz_in, s.vx[in], s.vx[gh], nx, ny, nz, rcfn_inv);
+        // 2. Velocity gradients (symmetry reflection)
+        for (std::size_t d = 0; d < 3; ++d) {
+            const std::size_t v = 1 + d;
+            apply_grad_slip_component_bc(gx[v][gh], gy[v][gh], gz[v][gh],
+                                         gx[v][in], gy[v][in], gz[v][in],
+                                         q[v][in], q[v][gh], nx, ny, nz, rcfn_inv);
+        }
 
-        // ==== y-velocity grad ====
-        gx_in = s_grad.dvy_dx(in); gy_in = s_grad.dvy_dy(in); gz_in = s_grad.dvy_dz(in);
-        apply_grad_slip_component_bc(s_grad.dvy_dx(gh), s_grad.dvy_dy(gh), s_grad.dvy_dz(gh),
-                                     gx_in, gy_in, gz_in, s.vy[in], s.vy[gh], nx, ny, nz, rcfn_inv);
-
-        // ==== z-velocity grad ====
-        gx_in = s_grad.dvz_dx(in); gy_in = s_grad.dvz_dy(in); gz_in = s_grad.dvz_dz(in);
-        apply_grad_slip_component_bc(s_grad.dvz_dx(gh), s_grad.dvz_dy(gh), s_grad.dvz_dz(gh),
-                                     gx_in, gy_in, gz_in, s.vz[in], s.vz[gh], nx, ny, nz, rcfn_inv);
-
-        // ==== temperature grad (zero normal gradient: dT/dn = 0) ====
-        gx_in = s_grad.dtmp_dx(in); gy_in = s_grad.dtmp_dy(in); gz_in = s_grad.dtmp_dz(in);
-        apply_grad_fixed_gradient_bc(s_grad.dtmp_dx(gh), s_grad.dtmp_dy(gh), s_grad.dtmp_dz(gh),
-                                     gx_in, gy_in, gz_in, 0.0, nx, ny, nz);
+        // 3. Temperature gradient (zero normal gradient: dT/dn = 0)
+        apply_grad_fixed_gradient_bc(gx[4][gh], gy[4][gh], gz[4][gh],
+                                     gx[4][in], gy[4][in], gz[4][in],
+                                     0.0, nx, ny, nz);
 
         ++f_loc;
     }
 }
 
+} // anonymous namespace
+
 /**
  * @class SymmetryBC
- * @brief Symmetry boundary condition implementation.
+ * @brief Symmetry boundary condition implementation for planar reflection.
  */
-template <eos::EquationOfState EOS>
+template <eos::EquationOfStatePolicy EOS>
 class SymmetryBC final : public BoundaryCondition<EOS> {
 public:
     SymmetryBC(std::string zone, const LocalIndex fbeg, const LocalIndex fend)
         : BoundaryCondition<EOS>(std::move(zone), fbeg, fend) {}
 
-    void apply(fields::PrimitiveView<double> state,
-               const mesh::MeshPart& mesh,
-               const EOS& /*eos*/) const override {
-        symmetry_kernel(state, mesh, this->m_begin, this->m_end);
+    void update_ghost_cells(std::span<double* const> q,
+                            const mesh::MeshPart& mesh,
+                            const EOS& /*eos*/) const override {
+        assert(q.size() == 5 && "SymmetryBC requires exactly 5 mean-flow variables");
+        symmetry_kernel(q, mesh, this->m_begin, this->m_end);
     }
 
-    void apply_grad(fields::ConstPrimitiveView state,
-                    fields::PrimitiveGradView<double> state_grad,
-                    const mesh::MeshPart& mesh) const override {
-        symmetry_grad_kernel(state, state_grad, mesh, this->m_begin, this->m_end);
+    void update_ghost_cells_grad(std::span<const double* const> q,
+                                 std::span<double* const> gx,
+                                 std::span<double* const> gy,
+                                 std::span<double* const> gz,
+                                 const mesh::MeshPart& mesh) const override {
+        assert(q.size() == 5 && gx.size() == 5 && gy.size() == 5 && gz.size() == 5);
+        symmetry_grad_kernel(q, gx, gy, gz, mesh, this->m_begin, this->m_end);
     }
 
     [[nodiscard]] BCType kind() const noexcept override { return BCType::Symmetry; }

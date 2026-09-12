@@ -33,11 +33,19 @@ public:
 
     void setup_gradient(const mesh::MeshPart& mesh, mesh::MeshAuxConnectivity& aux_conn);
 
-    void apply_gradient(const double* s, double* g, const std::size_t stride, 
-                        const mesh::MeshPart& mesh, const mesh::MeshAuxConnectivity& aux_conn) const;
+    void apply_gradient(const double* CFD_RESTRICT s,
+                        double* CFD_RESTRICT gx,
+                        double* CFD_RESTRICT gy,
+                        double* CFD_RESTRICT gz,
+                        const mesh::MeshPart& mesh, 
+                        const mesh::MeshAuxConnectivity& aux_conn) const;
 
-    void apply_gradient_set(std::span<const double*> s, std::span<double*> g, const std::size_t stride, 
-                            const mesh::MeshPart& mesh, const mesh::MeshAuxConnectivity& aux_conn) const;
+    void apply_gradient_set(std::span<const double* const> s,
+                            std::span<double* const> gx,
+                            std::span<double* const> gy,
+                            std::span<double* const> gz,
+                            const mesh::MeshPart& mesh,
+                            const mesh::MeshAuxConnectivity& aux_conn) const;
 
     [[nodiscard]] const char* active_gradient_name() const noexcept {
         return grad_ ? grad_->name() : "none";

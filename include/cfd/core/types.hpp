@@ -53,13 +53,6 @@ inline constexpr double kSutherlandT         = 110.4;    // [K] Sutherland tempe
 inline constexpr double kSpectralRadiusFloor = 1.0e-14;  // [1 / s] keeps dt finite
 inline constexpr double kResidualNormFloor   = 1.0e-300; // guards relative norms vs 0 / 0
 
-// --- Number of variables -----------------------------------------------------
-inline constexpr int kNumVars = 5;    // number of mean-flow variables:
-                                      // [ro rou rov row roE] or
-                                      // [p u v w T] or
-                                      // other variants
-
-
 } // namespace constants
 
 } // namespace cfd

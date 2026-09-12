@@ -1,6 +1,3 @@
-// Forward Euler (first-order explicit) time integration policy.
-//
-//   u^{n+1} = u^n - alpha * R(u^n),   alpha = cfl / lambda
 #pragma once
 
 #include "cfd/fields/update_ops.hpp"
@@ -19,7 +16,6 @@ class ForwardEuler {
 public:
     using Operator = Op;
 
-    static constexpr bool kNeedsPrevSnapshot = false;
     static constexpr bool kNeedsMatrix = false;
     static constexpr mesh::AuxConnType kAuxConnectivity = mesh::AuxConnType::None;
     static constexpr mesh::AuxGeomType kAuxGeometry = mesh::AuxGeomType::None;

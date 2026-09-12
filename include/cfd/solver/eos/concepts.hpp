@@ -4,11 +4,12 @@
 
 namespace cfd::solver::eos {
 
-// ============================================================================
-// C++20 Concept: General 2-Parameter Thermodynamic Equation of State
-// ============================================================================
+/**
+ * @concept EquationOfStatePolicy
+ * @brief General concept for all EOS
+ */
 template <typename T>
-concept EquationOfState = requires(const T eos, double rho, double p, double T_val, double e, double H, double v2) {
+concept EquationOfStatePolicy = requires(const T eos, double rho, double p, double T_val, double e, double H, double v2) {
     { eos.name() } -> std::convertible_to<const char*>;
     { eos.gamma() } -> std::convertible_to<double>;
     { eos.gas_constant() } -> std::convertible_to<double>;

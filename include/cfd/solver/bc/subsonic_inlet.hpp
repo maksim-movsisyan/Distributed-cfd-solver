@@ -1,7 +1,10 @@
 #pragma once
 
+#include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstddef>
+#include <span>
 #include <string>
 #include <utility>
 
@@ -10,14 +13,12 @@
 #include "cfd/solver/bc/bc.hpp"
 #include "cfd/solver/bc/bc_fill_gradients.hpp"
 #include "cfd/solver/bc/bc_fill_values.hpp"
-#include "cfd/solver/eos/eos_concept.hpp"
-#include "cfd/fields/fields_view.hpp"
+#include "cfd/solver/eos/concepts.hpp"
 
 namespace cfd::solver::bc {
 
 /** 
  * @brief Canonical resolved primitive state for Subsonic Inlet (fixed velocity & temperature, extrapolated pressure).
- * @note In from_mach_angles and from_mach_direction IDEAL GAS EOS SUGESTED!!!!
  */
 struct SubsonicInletParams {    
     double vx_inlet{0.0};
@@ -34,18 +35,19 @@ struct SubsonicInletParams {
     }
 
     // 2. Mach number + aerodynamic angles (alpha, beta in degrees) + temperature T
-    template <eos::EquationOfState EOS>
+    template <eos::EquationOfStatePolicy EOS>
     static SubsonicInletParams from_mach_angles(const EOS& eos,
                                                 const double T,
                                                 const double mach,
                                                 const double alpha_deg,
                                                 const double beta_deg) noexcept {
         constexpr double kDegToRad = M_PI / 180.0;
+        constexpr double kRefPressure = 101325.0;
         const double alpha_rad = alpha_deg * kDegToRad;
         const double beta_rad  = beta_deg  * kDegToRad;
 
-        const double rho = eos.density_Tp(T, 101325.0);
-        const double a   = eos.sound_speed_rhop(rho, 101325.0);
+        const double rho = eos.density_Tp(T, kRefPressure);
+        const double a   = eos.sound_speed_rhop(rho, kRefPressure);
         const double v_mag = mach * a;
 
         const double u = v_mag * std::cos(alpha_rad) * std::cos(beta_rad);
@@ -56,15 +58,16 @@ struct SubsonicInletParams {
     }
 
     // 3. Mach number + unit direction vector (dx, dy, dz) + temperature T
-    template <eos::EquationOfState EOS>
+    template <eos::EquationOfStatePolicy EOS>
     static SubsonicInletParams from_mach_direction(const EOS& eos,
                                                    const double T,
                                                    const double mach,
                                                    const double dx,
                                                    const double dy,
                                                    const double dz) noexcept {
-        const double rho = eos.density_Tp(T, 101325.0);
-        const double a   = eos.sound_speed_rhop(rho, 101325.0);
+        constexpr double kRefPressure = 101325.0;
+        const double rho = eos.density_Tp(T, kRefPressure);
+        const double a   = eos.sound_speed_rhop(rho, kRefPressure);
         const double v_mag = mach * a;
 
         const double norm = std::sqrt(dx * dx + dy * dy + dz * dz);
@@ -79,8 +82,10 @@ struct SubsonicInletParams {
     }
 };
 
-/** @brief Set value in ghost cell for Subsonic Inlet */
-inline void subsonic_inlet_kernel(fields::PrimitiveView<double> s,
+namespace {
+
+/** @brief Fills ghost cells with state values for Subsonic Inlet */
+inline void subsonic_inlet_kernel(std::span<double* const> q,
                                   const mesh::MeshPart& m,
                                   const LocalIndex fbeg,
                                   const LocalIndex fend,
@@ -96,6 +101,13 @@ inline void subsonic_inlet_kernel(fields::PrimitiveView<double> s,
     // Unpack topology array with restrict
     const LocalIndex* CFD_RESTRICT face_owner = m.face_owner.data();
 
+    // Cache primitive field pointers
+    double* CFD_RESTRICT prs = q[0];
+    double* CFD_RESTRICT vx  = q[1];
+    double* CFD_RESTRICT vy  = q[2];
+    double* CFD_RESTRICT vz  = q[3];
+    double* CFD_RESTRICT tmp = q[4];
+
     // Cache inlet parameters in registers
     const double vx_inlet  = p.vx_inlet;
     const double vy_inlet  = p.vy_inlet;
@@ -103,27 +115,32 @@ inline void subsonic_inlet_kernel(fields::PrimitiveView<double> s,
     const double tmp_inlet = p.tmp_inlet;
 
     for (std::size_t face_idx = beg; face_idx < end; ++face_idx) {
-        const auto in = static_cast<std::size_t>(face_owner[face_idx]); // inner (real) cell
-        const auto gh = n_cells + f_loc;                                  // ghost cell
+        const auto in = static_cast<std::size_t>(face_owner[face_idx]);
+        const auto gh = n_cells + f_loc;
 
-        // ==== 1. Extrapolate pressure from interior: dp/dn = 0 ====
-        apply_extrapolation0_bc(s.prs[gh], s.prs[in]);
+        // 1. Extrapolate pressure from interior: dp/dn = 0
+        apply_extrapolation0_bc(prs[gh], prs[in]);
 
-        // ==== 2. Fixed Dirichlet velocities ====
-        apply_fixed_value_bc(s.vx[gh], s.vx[in], vx_inlet);
-        apply_fixed_value_bc(s.vy[gh], s.vy[in], vy_inlet);
-        apply_fixed_value_bc(s.vz[gh], s.vz[in], vz_inlet);
+        // 2. Fixed Dirichlet velocities: v_ghost = 2 * v_inlet - v_in
+        apply_fixed_value_bc(vx[gh], vx[in], vx_inlet);
+        apply_fixed_value_bc(vy[gh], vy[in], vy_inlet);
+        apply_fixed_value_bc(vz[gh], vz[in], vz_inlet);
 
-        // ==== 3. Fixed Dirichlet temperature ====
-        apply_fixed_value_bc(s.tmp[gh], s.tmp[in], tmp_inlet);
+        // 3. Fixed Dirichlet temperature: T_ghost = 2 * T_inlet - T_in
+        apply_fixed_value_bc(tmp[gh], tmp[in], tmp_inlet);
+
+        // Physical lower bound guard against negative temperature
+        tmp[gh] = std::max(tmp[gh], 1.0);
 
         ++f_loc;
     }
 }
 
-/** @brief Set gradient in ghost cell for Subsonic Inlet */
-inline void subsonic_inlet_grad_kernel(fields::ConstPrimitiveView s,
-                                       fields::PrimitiveGradView<double> s_grad,
+/** @brief Fills ghost cells with gradients for Subsonic Inlet */
+inline void subsonic_inlet_grad_kernel(std::span<const double* const> q,
+                                       std::span<double* const> gx,
+                                       std::span<double* const> gy,
+                                       std::span<double* const> gz,
                                        const mesh::MeshPart& m,
                                        const LocalIndex fbeg,
                                        const LocalIndex fend,
@@ -150,11 +167,8 @@ inline void subsonic_inlet_grad_kernel(fields::ConstPrimitiveView s,
     const double* CFD_RESTRICT ccy_ptr = m.cell_centroid_y.data();
     const double* CFD_RESTRICT ccz_ptr = m.cell_centroid_z.data();
 
-    // Cache inlet parameters in registers
-    const double vx_inlet  = p.vx_inlet;
-    const double vy_inlet  = p.vy_inlet;
-    const double vz_inlet  = p.vz_inlet;
-    const double tmp_inlet = p.tmp_inlet;
+    // Inlet target Dirichlet values: [vx, vy, vz, tmp]
+    const double q_inlet[4] = {p.vx_inlet, p.vy_inlet, p.vz_inlet, p.tmp_inlet};
 
     for (std::size_t face_idx = beg; face_idx < end; ++face_idx) {
         const auto in = static_cast<std::size_t>(face_owner[face_idx]);
@@ -177,39 +191,31 @@ inline void subsonic_inlet_grad_kernel(fields::ConstPrimitiveView s,
         const double rcfz = fcz - ccz;
 
         const double rcfn = rcfx * nx + rcfy * ny + rcfz * nz;
-        const double rcfn_inv = 1.0 / rcfn;
+        const double rcfn_inv = 1.0 / std::max(rcfn, 1.0e-14);
 
-        // ==== 1. Extrapolate pressure gradient ====
-        apply_grad_extrapolation0_bc(s_grad.dprs_dx(gh), s_grad.dprs_dy(gh), s_grad.dprs_dz(gh),
-                                     s_grad.dprs_dx(in), s_grad.dprs_dy(in), s_grad.dprs_dz(in));
+        // 1. Extrapolate pressure gradient: dp/dn = 0
+        apply_grad_extrapolation0_bc(gx[0][gh], gy[0][gh], gz[0][gh],
+                                     gx[0][in], gy[0][in], gz[0][in]);
 
-        // ==== 2. Fixed value gradients for velocities ====
-        double gx = s_grad.dvx_dx(in), gy = s_grad.dvx_dy(in), gz = s_grad.dvx_dz(in);
-        apply_grad_fixed_value_bc(s_grad.dvx_dx(gh), s_grad.dvx_dy(gh), s_grad.dvx_dz(gh),
-                                  gx, gy, gz, s.vx[in], vx_inlet, nx, ny, nz, rcfn_inv);
-
-        gx = s_grad.dvy_dx(in); gy = s_grad.dvy_dy(in); gz = s_grad.dvy_dz(in);
-        apply_grad_fixed_value_bc(s_grad.dvy_dx(gh), s_grad.dvy_dy(gh), s_grad.dvy_dz(gh),
-                                  gx, gy, gz, s.vy[in], vy_inlet, nx, ny, nz, rcfn_inv);
-
-        gx = s_grad.dvz_dx(in); gy = s_grad.dvz_dy(in); gz = s_grad.dvz_dz(in);
-        apply_grad_fixed_value_bc(s_grad.dvz_dx(gh), s_grad.dvz_dy(gh), s_grad.dvz_dz(gh),
-                                  gx, gy, gz, s.vz[in], vz_inlet, nx, ny, nz, rcfn_inv);
-
-        // ==== 3. Fixed value gradient for temperature ====
-        gx = s_grad.dtmp_dx(in); gy = s_grad.dtmp_dy(in); gz = s_grad.dtmp_dz(in);
-        apply_grad_fixed_value_bc(s_grad.dtmp_dx(gh), s_grad.dtmp_dy(gh), s_grad.dtmp_dz(gh),
-                                  gx, gy, gz, s.tmp[in], tmp_inlet, nx, ny, nz, rcfn_inv);
+        // 2. Fixed value gradients for velocities (1..3) and temperature (4)
+        for (std::size_t d = 0; d < 4; ++d) {
+            const std::size_t v = 1 + d;
+            apply_grad_fixed_value_bc(gx[v][gh], gy[v][gh], gz[v][gh],
+                                      gx[v][in], gy[v][in], gz[v][in],
+                                      q[v][in], q_inlet[d], nx, ny, nz, rcfn_inv);
+        }
 
         ++f_loc;
     }
 }
 
+} // anonymous namespace
+
 /**
  * @class SubsonicInletBC
  * @brief Subsonic Inlet boundary condition implementation.
  */
-template <eos::EquationOfState EOS>
+template <solver::eos::EquationOfStatePolicy EOS>
 class SubsonicInletBC final : public BoundaryCondition<EOS> {
 public:
     SubsonicInletBC(std::string zone,
@@ -219,16 +225,20 @@ public:
         : BoundaryCondition<EOS>(std::move(zone), fbeg, fend),
           m_p(p) {}
 
-    void apply(fields::PrimitiveView<double> state,
-               const mesh::MeshPart& mesh,
-               const EOS& /*eos*/) const override {
-        subsonic_inlet_kernel(state, mesh, this->m_begin, this->m_end, m_p);
+    void update_ghost_cells(std::span<double* const> q,
+                            const mesh::MeshPart& mesh,
+                            const EOS& /*eos*/) const override {
+        assert(q.size() == 5 && "SubsonicInletBC requires exactly 5 mean-flow variables");
+        subsonic_inlet_kernel(q, mesh, this->m_begin, this->m_end, m_p);
     }
 
-    void apply_grad(fields::ConstPrimitiveView state,
-                    fields::PrimitiveGradView<double> state_grad,
-                    const mesh::MeshPart& mesh) const override {
-        subsonic_inlet_grad_kernel(state, state_grad, mesh, this->m_begin, this->m_end, m_p);
+    void update_ghost_cells_grad(std::span<const double* const> q,
+                                 std::span<double* const> gx,
+                                 std::span<double* const> gy,
+                                 std::span<double* const> gz,
+                                 const mesh::MeshPart& mesh) const override {
+        assert(q.size() == 5 && gx.size() == 5 && gy.size() == 5 && gz.size() == 5);
+        subsonic_inlet_grad_kernel(q, gx, gy, gz, mesh, this->m_begin, this->m_end, m_p);
     }
 
     [[nodiscard]] BCType kind() const noexcept override { return BCType::SubsonicInlet; }

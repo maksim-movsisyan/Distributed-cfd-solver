@@ -1,17 +1,18 @@
 #include "cfd/solver/solver.hpp"
 
+#include "cfd/numerics/limiter/slope_limiters.hpp"
+#include "cfd/numerics/limiter/tvd_1d_limiters.hpp"
+#include "cfd/numerics/reconstruction/first_order.hpp"
+#include "cfd/numerics/reconstruction/muscl.hpp"
+#include "cfd/numerics/reconstruction/muscl_directional.hpp"
+
 #include "cfd/solver/config.hpp"
 #include "cfd/solver/eos/ideal_gas.hpp"
-#include "cfd/solver/limiter/limiters.hpp"
 #include "cfd/solver/physics/stack.hpp"
 #include "cfd/solver/physics/viscous_flow.hpp"
 #include "cfd/solver/physics/inviscid_flow.hpp"
-#include "cfd/solver/reconstruction/first_order.hpp"
-#include "cfd/solver/reconstruction/muscl.hpp"
-#include "cfd/solver/reconstruction/muscl_directional.hpp"
 #include "cfd/solver/fluxes/hllc.hpp"
 #include "cfd/solver/time/forward_euler.hpp"
-#include "cfd/solver/time/ssp_rk3.hpp"
 #include "cfd/solver/time/implicit_euler.hpp"
 #include "cfd/solver/time/time_mode.hpp"
 //#include "cfd/solver/turbulence/spalart_allmaras.hpp"
@@ -29,10 +30,6 @@ int dispatch_time_scheme(const SolverConfig& cfg,
     switch (cfg.scheme) {
         case TimeScheme::ForwardEuler:
             return Solver<EosType, FluxType, ReconType, PhysType, time::ForwardEuler, TimeModeType>(
-                cfg, bcfg, eos, phys, mp, comm).run();
-
-        case TimeScheme::SspRk3:
-            return Solver<EosType, FluxType, ReconType, PhysType, time::SspRk3, TimeModeType>(
                 cfg, bcfg, eos, phys, mp, comm).run();
 
         case TimeScheme::BackwardEuler:
@@ -91,17 +88,17 @@ int dispatch_multidim_limiter(const SolverConfig& cfg,
     switch (cfg.limiter) {
         case LimiterType::Venkatakrishnan:
             return dispatch_time_mode<EosType, FluxType,
-                                        MultidimRecon<limiter::Venkatakrishnan>, PhysType>(
+                                        MultidimRecon<numerics::limiter::Venkatakrishnan>, PhysType>(
                 cfg, bcfg, mp, comm, eos, phys);
 
         case LimiterType::BarthJespersen:
             return dispatch_time_mode<EosType, FluxType,
-                                        MultidimRecon<limiter::BarthJespersen>, PhysType>(
+                                        MultidimRecon<numerics::limiter::BarthJespersen>, PhysType>(
                 cfg, bcfg, mp, comm, eos, phys);
 
         case LimiterType::VanAlbada:
             return dispatch_time_mode<EosType, FluxType,
-                                        MultidimRecon<limiter::VanAlbada>, PhysType>(
+                                        MultidimRecon<numerics::limiter::VanAlbada>, PhysType>(
                 cfg, bcfg, mp, comm, eos, phys);
 
         default:
@@ -122,12 +119,12 @@ int dispatch_directional_limiter(const SolverConfig& cfg,
     switch (cfg.limiter) {
         case LimiterType::Minmod1D:
             return dispatch_time_mode<EosType, FluxType,
-                                        DirectionalRecon<limiter::Minmod1D>, PhysType>(
+                                        DirectionalRecon<numerics::limiter::tvd1d::Minmod>, PhysType>(
                 cfg, bcfg, mp, comm, eos, phys);
 
         case LimiterType::VanAlbada1D:
             return dispatch_time_mode<EosType, FluxType,
-                                        DirectionalRecon<limiter::VanAlbada1D>, PhysType>(
+                                        DirectionalRecon<numerics::limiter::tvd1d::VanAlbada>, PhysType>(
                 cfg, bcfg, mp, comm, eos, phys);
 
         default:
@@ -146,15 +143,15 @@ int dispatch_reconstruction(const SolverConfig& cfg,
                             const PhysType& phys) {
     switch (cfg.reconstruction) {
         case ReconType::FirstOrder:
-            return dispatch_time_mode<EosType, FluxType, recon::FirstOrder, PhysType>(
+            return dispatch_time_mode<EosType, FluxType, numerics::recon::FirstOrder, PhysType>(
                 cfg, bcfg, mp, comm, eos, phys);
 
         case ReconType::Muscl:
-            return dispatch_multidim_limiter<EosType, FluxType, PhysType, recon::Muscl>(
+            return dispatch_multidim_limiter<EosType, FluxType, PhysType, numerics::recon::Muscl>(
                 cfg, bcfg, mp, comm, eos, phys);
 
         case ReconType::MusclDirectional:
-            return dispatch_directional_limiter<EosType, FluxType, PhysType, recon::MusclDirectional>(
+            return dispatch_directional_limiter<EosType, FluxType, PhysType, numerics::recon::MusclDirectional>(
                 cfg, bcfg, mp, comm, eos, phys);
 
         default:

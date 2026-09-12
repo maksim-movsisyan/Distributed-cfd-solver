@@ -1,7 +1,10 @@
 #pragma once
 
+#include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstddef>
+#include <span>
 #include <string>
 #include <utility>
 
@@ -10,8 +13,7 @@
 #include "cfd/solver/bc/bc.hpp"
 #include "cfd/solver/bc/bc_fill_gradients.hpp"
 #include "cfd/solver/bc/bc_fill_values.hpp"
-#include "cfd/solver/eos/eos_concept.hpp"
-#include "cfd/fields/fields_view.hpp"
+#include "cfd/solver/eos/concepts.hpp"
 
 namespace cfd::solver::bc {
 
@@ -28,7 +30,7 @@ struct FarfieldParams {
     double R{287.052874};       ///< Specific gas constant [J / (kg K)]
 
     // if pressure, vlocity and tempareature are given
-    template <eos::EquationOfState EOS>
+    template <eos::EquationOfStatePolicy EOS>
     static FarfieldParams from_velocities(const EOS& eos,
                                           const double p,
                                           const double u,
@@ -39,7 +41,7 @@ struct FarfieldParams {
     }
 
     // if pressure, mach, angel of atack, slip angel and temperature are given
-    template <eos::EquationOfState EOS>
+    template <eos::EquationOfStatePolicy EOS>
     static FarfieldParams from_mach_angles(const EOS& eos,
                                            const double p,
                                            const double T,
@@ -62,7 +64,7 @@ struct FarfieldParams {
     }
 
     // if pressure, mach, direction vector and temperature are given
-    template <eos::EquationOfState EOS>
+    template <eos::EquationOfStatePolicy EOS>
     static FarfieldParams from_mach_direction(const EOS& eos,
                                               const double p,
                                               const double T,
@@ -88,14 +90,16 @@ struct FarfieldParams {
     }
 };
 
+namespace {
+
 /** @brief Helper evaluating boundary face state from 1D Riemann Invariants */
 inline void compute_riemann_farfield_state(const FarfieldParams& p,
-                                          const double p_in, const double T_in,
-                                          const double vx_in, const double vy_in, const double vz_in,
-                                          const double nx, const double ny, const double nz,
-                                          double& p_b, double& T_b,
-                                          double& vx_b, double& vy_b, double& vz_b,
-                                          bool& is_supersonic_outflow) noexcept {
+                                           const double p_in, const double T_in,
+                                           const double vx_in, const double vy_in, const double vz_in,
+                                           const double nx, const double ny, const double nz,
+                                           double& p_b, double& T_b,
+                                           double& vx_b, double& vy_b, double& vz_b,
+                                           bool& is_supersonic_outflow) noexcept {
     const double gm1 = p.gamma - 1.0;
     const double inv_gm1 = 1.0 / gm1;
 
@@ -166,7 +170,7 @@ inline void compute_riemann_farfield_state(const FarfieldParams& p,
 }
 
 /** @brief Set value in ghost cell for farfield */
-inline void farfield_kernel(fields::PrimitiveView<double> s,
+inline void farfield_kernel(std::span<double* const> q,
                             const mesh::MeshPart& m,
                             const LocalIndex fbeg,
                             const LocalIndex fend,
@@ -179,11 +183,17 @@ inline void farfield_kernel(fields::PrimitiveView<double> s,
     const auto n_inner_faces = static_cast<std::size_t>(m.n_inner_faces);
     std::size_t f_loc = beg - n_inner_faces;
 
-    // Unpack geometry pointers with restrict to eliminate indirection overhead
     const LocalIndex* CFD_RESTRICT face_owner = m.face_owner.data();
     const double* CFD_RESTRICT nx_ptr         = m.face_normal_x.data();
     const double* CFD_RESTRICT ny_ptr         = m.face_normal_y.data();
     const double* CFD_RESTRICT nz_ptr         = m.face_normal_z.data();
+
+    // Cache variable pointers
+    double* CFD_RESTRICT prs = q[0];
+    double* CFD_RESTRICT vx  = q[1];
+    double* CFD_RESTRICT vy  = q[2];
+    double* CFD_RESTRICT vz  = q[3];
+    double* CFD_RESTRICT tmp = q[4];
 
     for (std::size_t face_idx = beg; face_idx < end; ++face_idx) {
         const auto in = static_cast<std::size_t>(face_owner[face_idx]);
@@ -196,33 +206,38 @@ inline void farfield_kernel(fields::PrimitiveView<double> s,
         double pb = 0.0, Tb = 0.0, vxb = 0.0, vyb = 0.0, vzb = 0.0;
         bool is_supersonic_outflow = false;
 
-        compute_riemann_farfield_state(p, s.prs[in], s.tmp[in],
-                                       s.vx[in], s.vy[in], s.vz[in],
+        compute_riemann_farfield_state(p, prs[in], tmp[in],
+                                       vx[in], vy[in], vz[in],
                                        nx, ny, nz,
                                        pb, Tb, vxb, vyb, vzb,
                                        is_supersonic_outflow);
 
         if (is_supersonic_outflow) {
-            apply_extrapolation0_bc(s.prs[gh], s.prs[in]);
-            apply_extrapolation0_bc(s.vx[gh],  s.vx[in]);
-            apply_extrapolation0_bc(s.vy[gh],  s.vy[in]);
-            apply_extrapolation0_bc(s.vz[gh],  s.vz[in]);
-            apply_extrapolation0_bc(s.tmp[gh], s.tmp[in]);
+            apply_extrapolation0_bc(prs[gh], prs[in]);
+            apply_extrapolation0_bc(vx[gh],  vx[in]);
+            apply_extrapolation0_bc(vy[gh],  vy[in]);
+            apply_extrapolation0_bc(vz[gh],  vz[in]);
+            apply_extrapolation0_bc(tmp[gh], tmp[in]);
         } else {
-            apply_fixed_value_bc(s.prs[gh], s.prs[in], pb);
-            apply_fixed_value_bc(s.vx[gh],  s.vx[in],  vxb);
-            apply_fixed_value_bc(s.vy[gh],  s.vy[in],  vyb);
-            apply_fixed_value_bc(s.vz[gh],  s.vz[in],  vzb);
-            apply_fixed_value_bc(s.tmp[gh], s.tmp[in], Tb);
-        }
+            apply_fixed_value_bc(prs[gh], prs[in], pb);
+            apply_fixed_value_bc(vx[gh],  vx[in],  vxb);
+            apply_fixed_value_bc(vy[gh],  vy[in],  vyb);
+            apply_fixed_value_bc(vz[gh],  vz[in],  vzb);
+            apply_fixed_value_bc(tmp[gh], tmp[in], Tb);
 
+            // Numerical floor guards against strong expansion waves
+            prs[gh] = std::max(prs[gh], 1.0);
+            tmp[gh] = std::max(tmp[gh], 1.0);
+        }
         ++f_loc;
     }
 }
 
 /** @brief Set gradient in ghost cell for farfield */
-inline void farfield_grad_kernel(fields::ConstPrimitiveView s,
-                                 fields::PrimitiveGradView<double> s_grad,
+inline void farfield_grad_kernel(std::span<const double* const> q,
+                                 std::span<double* const> gx,
+                                 std::span<double* const> gy,
+                                 std::span<double* const> gz,
                                  const mesh::MeshPart& m,
                                  const LocalIndex fbeg,
                                  const LocalIndex fend,
@@ -235,7 +250,6 @@ inline void farfield_grad_kernel(fields::ConstPrimitiveView s,
     const auto n_inner_faces = static_cast<std::size_t>(m.n_inner_faces);
     std::size_t f_loc = beg - n_inner_faces;
 
-    // Unpack geometry and metric pointers with restrict
     const LocalIndex* CFD_RESTRICT face_owner = m.face_owner.data();
     const double* CFD_RESTRICT nx_ptr         = m.face_normal_x.data();
     const double* CFD_RESTRICT ny_ptr         = m.face_normal_y.data();
@@ -249,6 +263,12 @@ inline void farfield_grad_kernel(fields::ConstPrimitiveView s,
     const double* CFD_RESTRICT ccy_ptr = m.cell_centroid_y.data();
     const double* CFD_RESTRICT ccz_ptr = m.cell_centroid_z.data();
 
+    const double* CFD_RESTRICT prs = q[0];
+    const double* CFD_RESTRICT vx  = q[1];
+    const double* CFD_RESTRICT vy  = q[2];
+    const double* CFD_RESTRICT vz  = q[3];
+    const double* CFD_RESTRICT tmp = q[4];
+
     for (std::size_t face_idx = beg; face_idx < end; ++face_idx) {
         const auto in = static_cast<std::size_t>(face_owner[face_idx]);
         const auto gh = n_cells + f_loc;
@@ -260,72 +280,46 @@ inline void farfield_grad_kernel(fields::ConstPrimitiveView s,
         double pb = 0.0, Tb = 0.0, vxb = 0.0, vyb = 0.0, vzb = 0.0;
         bool is_supersonic_outflow = false;
 
-        compute_riemann_farfield_state(p, s.prs[in], s.tmp[in],
-                                       s.vx[in], s.vy[in], s.vz[in],
+        compute_riemann_farfield_state(p, prs[in], tmp[in],
+                                       vx[in], vy[in], vz[in],
                                        nx, ny, nz,
                                        pb, Tb, vxb, vyb, vzb,
                                        is_supersonic_outflow);
 
         if (is_supersonic_outflow) {
-            apply_grad_extrapolation0_bc(s_grad.dprs_dx(gh), s_grad.dprs_dy(gh), s_grad.dprs_dz(gh),
-                                         s_grad.dprs_dx(in), s_grad.dprs_dy(in), s_grad.dprs_dz(in));
-            apply_grad_extrapolation0_bc(s_grad.dvx_dx(gh), s_grad.dvx_dy(gh), s_grad.dvx_dz(gh),
-                                         s_grad.dvx_dx(in), s_grad.dvx_dy(in), s_grad.dvx_dz(in));
-            apply_grad_extrapolation0_bc(s_grad.dvy_dx(gh), s_grad.dvy_dy(gh), s_grad.dvy_dz(gh),
-                                         s_grad.dvy_dx(in), s_grad.dvy_dy(in), s_grad.dvy_dz(in));
-            apply_grad_extrapolation0_bc(s_grad.dvz_dx(gh), s_grad.dvz_dy(gh), s_grad.dvz_dz(gh),
-                                         s_grad.dvz_dx(in), s_grad.dvz_dy(in), s_grad.dvz_dz(in));
-            apply_grad_extrapolation0_bc(s_grad.dtmp_dx(gh), s_grad.dtmp_dy(gh), s_grad.dtmp_dz(gh),
-                                         s_grad.dtmp_dx(in), s_grad.dtmp_dy(in), s_grad.dtmp_dz(in));
+
+            for (std::size_t v = 0; v < 5; ++v) {
+                apply_grad_extrapolation0_bc(gx[v][gh], gy[v][gh], gz[v][gh],
+                                             gx[v][in], gy[v][in], gz[v][in]);
+            }
         } else {
-            const double fcx = fcx_ptr[face_idx];
-            const double fcy = fcy_ptr[face_idx];
-            const double fcz = fcz_ptr[face_idx];
-
-            const double ccx = ccx_ptr[in];
-            const double ccy = ccy_ptr[in];
-            const double ccz = ccz_ptr[in];
-
-            const double rcfx = fcx - ccx;
-            const double rcfy = fcy - ccy;
-            const double rcfz = fcz - ccz;
+            const double rcfx = fcx_ptr[face_idx] - ccx_ptr[in];
+            const double rcfy = fcy_ptr[face_idx] - ccy_ptr[in];
+            const double rcfz = fcz_ptr[face_idx] - ccz_ptr[in];
 
             const double rcfn = rcfx * nx + rcfy * ny + rcfz * nz;
-            const double rcfn_inv = 1.0 / rcfn;
+            const double rcfn_inv = 1.0 / std::max(rcfn, 1.0e-14);
 
-            // Pressure
-            double gx = s_grad.dprs_dx(in), gy = s_grad.dprs_dy(in), gz = s_grad.dprs_dz(in);
-            apply_grad_fixed_value_bc(s_grad.dprs_dx(gh), s_grad.dprs_dy(gh), s_grad.dprs_dz(gh),
-                                      gx, gy, gz, s.prs[in], pb, nx, ny, nz, rcfn_inv);
+            const double q_b[5] = {pb, vxb, vyb, vzb, Tb};
 
-            // Velocities
-            gx = s_grad.dvx_dx(in); gy = s_grad.dvx_dy(in); gz = s_grad.dvx_dz(in);
-            apply_grad_fixed_value_bc(s_grad.dvx_dx(gh), s_grad.dvx_dy(gh), s_grad.dvx_dz(gh),
-                                      gx, gy, gz, s.vx[in], vxb, nx, ny, nz, rcfn_inv);
-
-            gx = s_grad.dvy_dx(in); gy = s_grad.dvy_dy(in); gz = s_grad.dvy_dz(in);
-            apply_grad_fixed_value_bc(s_grad.dvy_dx(gh), s_grad.dvy_dy(gh), s_grad.dvy_dz(gh),
-                                      gx, gy, gz, s.vy[in], vyb, nx, ny, nz, rcfn_inv);
-
-            gx = s_grad.dvz_dx(in); gy = s_grad.dvz_dy(in); gz = s_grad.dvz_dz(in);
-            apply_grad_fixed_value_bc(s_grad.dvz_dx(gh), s_grad.dvz_dy(gh), s_grad.dvz_dz(gh),
-                                      gx, gy, gz, s.vz[in], vzb, nx, ny, nz, rcfn_inv);
-
-            // Temperature
-            gx = s_grad.dtmp_dx(in); gy = s_grad.dtmp_dy(in); gz = s_grad.dtmp_dz(in);
-            apply_grad_fixed_value_bc(s_grad.dtmp_dx(gh), s_grad.dtmp_dy(gh), s_grad.dtmp_dz(gh),
-                                      gx, gy, gz, s.tmp[in], Tb, nx, ny, nz, rcfn_inv);
+            for (std::size_t v = 0; v < 5; ++v) {
+                apply_grad_fixed_value_bc(gx[v][gh], gy[v][gh], gz[v][gh],
+                                          gx[v][in], gy[v][in], gz[v][in], 
+                                          q[v][in], q_b[v], nx, ny, nz, rcfn_inv);
+            }
         }
 
         ++f_loc;
     }
 }
 
+} // namespace 
+
 /**
  * @class FarfieldBC
  * @brief Non-reflecting characteristic boundary condition based on 1D Riemann Invariants.
  */
-template <eos::EquationOfState EOS>
+template <eos::EquationOfStatePolicy EOS>
 class FarfieldBC final : public BoundaryCondition<EOS> {
 public:
     FarfieldBC(std::string zone,
@@ -334,16 +328,20 @@ public:
                const FarfieldParams& p)
         : BoundaryCondition<EOS>(std::move(zone), fbeg, fend), m_p(p) {}
 
-    void apply(fields::PrimitiveView<double> state,
-               const mesh::MeshPart& mesh,
-               const EOS& /*eos*/) const override {
-        farfield_kernel(state, mesh, this->m_begin, this->m_end, m_p);
+    void update_ghost_cells(std::span<double* const> q, 
+                            const mesh::MeshPart& mesh,
+                            const EOS&) const override {
+        assert(q.size() == 5 && "Compressible FarfieldBC requires exactly 5 mean-flow variables");
+        farfield_kernel(q, mesh, this->m_begin, this->m_end, m_p);
     }
 
-    void apply_grad(fields::ConstPrimitiveView state,
-                    fields::PrimitiveGradView<double> state_grad,
-                    const mesh::MeshPart& mesh) const override {
-        farfield_grad_kernel(state, state_grad, mesh, this->m_begin, this->m_end, m_p);
+    void update_ghost_cells_grad(std::span<const double* const> q, 
+                                 std::span<double* const> gx, 
+                                 std::span<double* const> gy, 
+                                 std::span<double* const> gz, 
+                                 const mesh::MeshPart& mesh) const override {
+        assert(q.size() == 5 && gx.size() == 5 && gy.size() == 5 && gz.size() == 5);
+        farfield_grad_kernel(q, gx, gy, gz, mesh, this->m_begin, this->m_end, m_p);
     }
 
     [[nodiscard]] BCType kind() const noexcept override { return BCType::Farfield; }

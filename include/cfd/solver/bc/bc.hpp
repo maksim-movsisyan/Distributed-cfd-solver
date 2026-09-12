@@ -1,14 +1,16 @@
 #pragma once
 
 #include "cfd/core/types.hpp"
-#include "cfd/fields/fields_view.hpp"
-#include "cfd/solver/eos/eos_concept.hpp"
+#include "cfd/solver/eos/concepts.hpp"
 #include "cfd/mesh/localmesh.hpp"
+
 #include <string>
+#include <span>
 
 namespace cfd::solver::bc {
 
 enum class BCType {
+    // Physical (coupled) BCs:
     SupersonicInlet,
     SupersonicOutlet,
     SubsonicInlet,
@@ -17,7 +19,7 @@ enum class BCType {
     NoSlipWall,
     NoSlipWallHeatFlux,
     Symmetry,
-    Farfield,
+    Farfield
 };
 
 enum class InflowMode {
@@ -47,7 +49,7 @@ enum class InflowMode {
  * 
  * Ghost cells for patch faces start at index: c_ghost = n_cells + (face_idx - n_inner_faces).
  */
-template <eos::EquationOfState EOS>
+template <eos::EquationOfStatePolicy EOS>
 class BoundaryCondition {
 public:
     /**
@@ -60,15 +62,24 @@ public:
         : m_zone(std::move(zone)), m_begin(fbeg), m_end(fend) {}
     virtual ~BoundaryCondition() = default;
 
-    /** @brief Patch apply subroutine */
-    virtual void apply(fields::PrimitiveView<double> state, 
-                       const mesh::MeshPart& mesh,
-                       const EOS& eos) const = 0;
+    /**
+     * @brief Patch apply subroutine
+     * @param[inout] q - MeanFlow variables span [p u v w T]
+     */
+    virtual void update_ghost_cells(std::span<double* const> q, 
+                                    const mesh::MeshPart& mesh,
+                                    const EOS& eos) const = 0;
 
-    /** @brief Patch apply gradients subroutine */
-    virtual void apply_grad(fields::PrimitiveView<const double> state, 
-                            fields::PrimitiveGradView<double> state_grad, 
-                            const mesh::MeshPart& mesh) const = 0;
+    /** 
+     * @brief Patch apply gradients subroutine
+     * @param[in] q - MeanFlow variables span [p u v w (T)]
+     * @param[inout] gxyz - MeanFlow variables gradients spans [grad_pxyz grad_uxyz grad_vxyz grad_wxyz grad_Txyz]
+     */
+    virtual void update_ghost_cells_grad(std::span<const double* const> q, 
+                                         std::span<double* const> gx, 
+                                         std::span<double* const> gy, 
+                                         std::span<double* const> gz, 
+                                         const mesh::MeshPart& mesh) const = 0;
 
     [[nodiscard]] virtual BCType kind() const noexcept = 0;
     

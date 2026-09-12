@@ -1,6 +1,9 @@
 #pragma once
 
+#include <algorithm>
+#include <cassert>
 #include <cstddef>
+#include <span>
 #include <string>
 #include <utility>
 
@@ -9,8 +12,7 @@
 #include "cfd/solver/bc/bc.hpp"
 #include "cfd/solver/bc/bc_fill_gradients.hpp"
 #include "cfd/solver/bc/bc_fill_values.hpp"
-#include "cfd/solver/eos/eos_concept.hpp"
-#include "cfd/fields/fields_view.hpp"
+#include "cfd/solver/eos/concepts.hpp"
 
 namespace cfd::solver::bc {
 
@@ -43,8 +45,10 @@ struct NoSlipWallHeatFluxParams {
     }
 };
 
-/** @brief Set value in ghost cell for No-Slip Wall with temperature gradient */
-inline void no_slip_wall_heat_flux_kernel(fields::PrimitiveView<double> s,
+namespace {
+
+/** @brief Fills ghost cells with state values for No-Slip Wall with specified temperature gradient */
+inline void no_slip_wall_heat_flux_kernel(std::span<double* const> q,
                                           const mesh::MeshPart& m,
                                           const LocalIndex fbeg,
                                           const LocalIndex fend,
@@ -71,6 +75,13 @@ inline void no_slip_wall_heat_flux_kernel(fields::PrimitiveView<double> s,
     const double* CFD_RESTRICT ccy_ptr = m.cell_centroid_y.data();
     const double* CFD_RESTRICT ccz_ptr = m.cell_centroid_z.data();
 
+    // Cache primitive field pointers
+    double* CFD_RESTRICT prs = q[0];
+    double* CFD_RESTRICT vx  = q[1];
+    double* CFD_RESTRICT vy  = q[2];
+    double* CFD_RESTRICT vz  = q[3];
+    double* CFD_RESTRICT tmp = q[4];
+
     // Cache wall parameters in registers
     const double vx_w          = p.vx_wall;
     const double vy_w          = p.vy_wall;
@@ -78,18 +89,18 @@ inline void no_slip_wall_heat_flux_kernel(fields::PrimitiveView<double> s,
     const double tmp_grad_wall = p.tmp_grad_wall;
 
     for (std::size_t face_idx = beg; face_idx < end; ++face_idx) {
-        const auto in = static_cast<std::size_t>(face_owner[face_idx]); // inner (real) cell
-        const auto gh = n_cells + f_loc;                                  // ghost cell
+        const auto in = static_cast<std::size_t>(face_owner[face_idx]);
+        const auto gh = n_cells + f_loc;
 
-        // ==== 1. Zero normal pressure gradient: dp/dn = 0 ====
-        apply_extrapolation0_bc(s.prs[gh], s.prs[in]);
+        // 1. Zero normal pressure gradient: dp/dn = 0
+        apply_extrapolation0_bc(prs[gh], prs[in]);
 
-        // ==== 2. Dirichlet velocity: v_ghost = 2 * v_wall - v_in ====
-        apply_fixed_value_bc(s.vx[gh], s.vx[in], vx_w);
-        apply_fixed_value_bc(s.vy[gh], s.vy[in], vy_w);
-        apply_fixed_value_bc(s.vz[gh], s.vz[in], vz_w);
+        // 2. Dirichlet velocity: v_ghost = 2 * v_wall - v_in
+        apply_fixed_value_bc(vx[gh], vx[in], vx_w);
+        apply_fixed_value_bc(vy[gh], vy[in], vy_w);
+        apply_fixed_value_bc(vz[gh], vz[in], vz_w);
 
-        // ==== 3. Neumann temperature gradient: dT/dn = tmp_grad_wall ====
+        // 3. Neumann temperature gradient: dT/dn = tmp_grad_wall
         const double nx = nx_ptr[face_idx];
         const double ny = ny_ptr[face_idx];
         const double nz = nz_ptr[face_idx];
@@ -108,15 +119,20 @@ inline void no_slip_wall_heat_flux_kernel(fields::PrimitiveView<double> s,
 
         const double rcfn = rcfx * nx + rcfy * ny + rcfz * nz;
 
-        apply_fixed_gradient_bc(s.tmp[gh], s.tmp[in], tmp_grad_wall, rcfn);
+        apply_fixed_gradient_bc(tmp[gh], tmp[in], tmp_grad_wall, rcfn);
+
+        // Physical lower bound guard against negative temperature in strong expansion
+        tmp[gh] = std::max(tmp[gh], 1.0);
 
         ++f_loc;
     }
 }
 
-/** @brief Set gradient in ghost cell for No-Slip Wall with temperature gradient */
-inline void no_slip_wall_heat_flux_grad_kernel(fields::ConstPrimitiveView s,
-                                               fields::PrimitiveGradView<double> s_grad,
+/** @brief Fills ghost cells with gradients for No-Slip Wall with specified temperature gradient */
+inline void no_slip_wall_heat_flux_grad_kernel(std::span<const double* const> q,
+                                               std::span<double* const> gx,
+                                               std::span<double* const> gy,
+                                               std::span<double* const> gz,
                                                const mesh::MeshPart& m,
                                                const LocalIndex fbeg,
                                                const LocalIndex fend,
@@ -143,10 +159,7 @@ inline void no_slip_wall_heat_flux_grad_kernel(fields::ConstPrimitiveView s,
     const double* CFD_RESTRICT ccy_ptr = m.cell_centroid_y.data();
     const double* CFD_RESTRICT ccz_ptr = m.cell_centroid_z.data();
 
-    // Cache wall parameters in registers
-    const double vx_w          = p.vx_wall;
-    const double vy_w          = p.vy_wall;
-    const double vz_w          = p.vz_wall;
+    const double v_wall[3]     = {p.vx_wall, p.vy_wall, p.vz_wall};
     const double tmp_grad_wall = p.tmp_grad_wall;
 
     for (std::size_t face_idx = beg; face_idx < end; ++face_idx) {
@@ -170,58 +183,58 @@ inline void no_slip_wall_heat_flux_grad_kernel(fields::ConstPrimitiveView s,
         const double rcfz = fcz - ccz;
 
         const double rcfn = rcfx * nx + rcfy * ny + rcfz * nz;
-        const double rcfn_inv = 1.0 / rcfn;
+        const double rcfn_inv = 1.0 / std::max(rcfn, 1.0e-14);
 
-        // ==== 1. Pressure gradient extrapolation ====
-        apply_grad_extrapolation0_bc(s_grad.dprs_dx(gh), s_grad.dprs_dy(gh), s_grad.dprs_dz(gh),
-                                     s_grad.dprs_dx(in), s_grad.dprs_dy(in), s_grad.dprs_dz(in));
+        // 1. Pressure gradient extrapolation
+        apply_grad_extrapolation0_bc(gx[0][gh], gy[0][gh], gz[0][gh],
+                                     gx[0][in], gy[0][in], gz[0][in]);
 
-        // ==== 2. Velocity gradient (fixed value at face) ====
-        double gx = s_grad.dvx_dx(in), gy = s_grad.dvx_dy(in), gz = s_grad.dvx_dz(in);
-        apply_grad_fixed_value_bc(s_grad.dvx_dx(gh), s_grad.dvx_dy(gh), s_grad.dvx_dz(gh),
-                                  gx, gy, gz, s.vx[in], vx_w, nx, ny, nz, rcfn_inv);
+        // 2. Velocity gradient (fixed value at wall)
+        for (std::size_t d = 0; d < 3; ++d) {
+            const std::size_t v = 1 + d;
+            apply_grad_fixed_value_bc(gx[v][gh], gy[v][gh], gz[v][gh],
+                                      gx[v][in], gy[v][in], gz[v][in],
+                                      q[v][in], v_wall[d], nx, ny, nz, rcfn_inv);
+        }
 
-        gx = s_grad.dvy_dx(in); gy = s_grad.dvy_dy(in); gz = s_grad.dvy_dz(in);
-        apply_grad_fixed_value_bc(s_grad.dvy_dx(gh), s_grad.dvy_dy(gh), s_grad.dvy_dz(gh),
-                                  gx, gy, gz, s.vy[in], vy_w, nx, ny, nz, rcfn_inv);
-
-        gx = s_grad.dvz_dx(in); gy = s_grad.dvz_dy(in); gz = s_grad.dvz_dz(in);
-        apply_grad_fixed_value_bc(s_grad.dvz_dx(gh), s_grad.dvz_dy(gh), s_grad.dvz_dz(gh),
-                                  gx, gy, gz, s.vz[in], vz_w, nx, ny, nz, rcfn_inv);
-
-        // ==== 3. Temperature gradient (fixed normal gradient) ====
-        gx = s_grad.dtmp_dx(in); gy = s_grad.dtmp_dy(in); gz = s_grad.dtmp_dz(in);
-        apply_grad_fixed_gradient_bc(s_grad.dtmp_dx(gh), s_grad.dtmp_dy(gh), s_grad.dtmp_dz(gh),
-                                     gx, gy, gz, tmp_grad_wall, nx, ny, nz);
+        // 3. Temperature gradient (fixed normal gradient)
+        apply_grad_fixed_gradient_bc(gx[4][gh], gy[4][gh], gz[4][gh],
+                                     gx[4][in], gy[4][in], gz[4][in],
+                                     tmp_grad_wall, nx, ny, nz);
 
         ++f_loc;
     }
 }
 
+} // anonymous namespace
+
 /**
  * @class NoSlipWallHeatFluxBC
  * @brief No-Slip Wall boundary condition with specified normal temperature gradient / heat flux.
  */
-template <eos::EquationOfState EOS>
+template <eos::EquationOfStatePolicy EOS>
 class NoSlipWallHeatFluxBC final : public BoundaryCondition<EOS> {
 public:
     NoSlipWallHeatFluxBC(std::string zone,
                          const LocalIndex fbeg,
                          const LocalIndex fend,
                          const NoSlipWallHeatFluxParams& p)
-        : BoundaryCondition<EOS>(std::move(zone), fbeg, fend),
-          m_p(p) {}
+        : BoundaryCondition<EOS>(std::move(zone), fbeg, fend), m_p(p) {}
 
-    void apply(fields::PrimitiveView<double> state,
-               const mesh::MeshPart& mesh,
-               const EOS& /*eos*/) const override {
-        no_slip_wall_heat_flux_kernel(state, mesh, this->m_begin, this->m_end, m_p);
+    void update_ghost_cells(std::span<double* const> q,
+                            const mesh::MeshPart& mesh,
+                            const EOS& /*eos*/) const override {
+        assert(q.size() == 5 && "NoSlipWallHeatFluxBC requires exactly 5 mean-flow variables");
+        no_slip_wall_heat_flux_kernel(q, mesh, this->m_begin, this->m_end, m_p);
     }
 
-    void apply_grad(fields::ConstPrimitiveView state,
-                    fields::PrimitiveGradView<double> state_grad,
-                    const mesh::MeshPart& mesh) const override {
-        no_slip_wall_heat_flux_grad_kernel(state, state_grad, mesh, this->m_begin, this->m_end, m_p);
+    void update_ghost_cells_grad(std::span<const double* const> q,
+                                 std::span<double* const> gx,
+                                 std::span<double* const> gy,
+                                 std::span<double* const> gz,
+                                 const mesh::MeshPart& mesh) const override {
+        assert(q.size() == 5 && gx.size() == 5 && gy.size() == 5 && gz.size() == 5);
+        no_slip_wall_heat_flux_grad_kernel(q, gx, gy, gz, mesh, this->m_begin, this->m_end, m_p);
     }
 
     [[nodiscard]] BCType kind() const noexcept override { return BCType::NoSlipWallHeatFlux; }

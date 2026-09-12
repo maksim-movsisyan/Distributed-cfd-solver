@@ -38,14 +38,13 @@ class BackwardEuler {
 public:
     using Operator = Op;
 
-    static constexpr bool kNeedsPrevSnapshot = false;
     static constexpr bool kNeedsMatrix = true;
     static constexpr mesh::AuxConnType kAuxConnectivity = mesh::AuxConnType::CellCellsByFace;   // dual graph for matrix initialization
     static constexpr mesh::AuxGeomType kAuxGeometry = mesh::AuxGeomType::None;
     static constexpr const char* name() noexcept { return "BACKWARD_EULER"; }
 
     void system_setup(const mesh::MeshPart& mesh, const mesh::MeshAuxConnectivity& aux_conn, const linalg::SolverParams& solver_params, MPI_Comm comm) {
-        system_ = std::make_unique<MeanFlowSystem>(mesh, aux_conn, solver_params, comm);
+        system_ = std::make_unique<BlockLinearSystem<5>>(mesh, aux_conn, solver_params, comm);
     }
 
     void advance(Op& op) noexcept {
@@ -70,10 +69,10 @@ public:
         for (std::size_t v = 0; v < 5; ++v) {
             double* CFD_RESTRICT dst = stage[v];
             const double* CFD_RESTRICT src = u[v];
-            const std::size_t n_own = system_->nown();
+            const std::size_t n_own = system_->n_own();
 
             for (std::size_t c = 0; c < n_own; ++c) {
-                dst[c] = src[c] + du[c * constants::kNumVars + v];
+                dst[c] = src[c] + du[c * 5 + v];
             }
         }
 
@@ -81,7 +80,7 @@ public:
             for (std::size_t v = 5; v < u.size(); ++v) {
                 double* CFD_RESTRICT dst = stage[v];
                 const double* CFD_RESTRICT src = u[v];
-                const std::size_t n_own = system_->nown();
+                const std::size_t n_own = system_->n_own();
                 for (std::size_t c = 0; c < n_own; ++c) {
                     dst[c] = src[c];
                 }
@@ -93,17 +92,17 @@ public:
     }
 
 private:
-    std::unique_ptr<MeanFlowSystem> system_;
+    std::unique_ptr<BlockLinearSystem<5>> system_;
 
     void set_rhs_and_zero_du(std::span<double* const> res_slots) {
         double* CFD_RESTRICT b = system_->rhs_data();
         double* CFD_RESTRICT du = system_->du_data();
-        const std::size_t n_own = system_->nown();
+        const std::size_t n_own = system_->n_own();
 
         for (std::size_t c = 0; c < n_own; ++c) {
-            for (std::size_t v = 0; v < constants::kNumVars; ++v) {
-                b[c * constants::kNumVars + v] = -res_slots[v][c];
-                du[c * constants::kNumVars + v] = 0.0;
+            for (std::size_t v = 0; v < 5; ++v) {
+                b[c * 5 + v] = -res_slots[v][c];
+                du[c * 5 + v] = 0.0;
             }
         }
     }

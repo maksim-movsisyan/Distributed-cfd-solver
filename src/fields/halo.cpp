@@ -7,7 +7,6 @@
 #include <vector>
 #include <cstring>
 
-#include "cfd/core/types.hpp"
 #include "cfd/mpi/log.hpp"
 
 namespace cfd::fields::halo {
@@ -163,17 +162,16 @@ void HaloExchanger::register_cell_fields(std::span<double* const> fields) {
     resize_phase(fields_phase_, "fields");
 }
 
-void HaloExchanger::register_grad_limiters(std::span<double* const> grad_bases,
-                                           const std::size_t plane_stride,
+void HaloExchanger::register_grad_limiters(std::span<double* const> grad_bases_x,
+                                           std::span<double* const> grad_bases_y,
+                                           std::span<double* const> grad_bases_z,
                                            std::span<double* const> limiters) {
-    // Flatten 3D gradient tensor planes into direct pointers:
-    // Layout for this registered block: [dx vars][dy vars][dz vars][limiters]
-    for (std::size_t plane = 0; plane < 3; ++plane) {
-        const std::size_t offset = plane * plane_stride;
-        for (double* base : grad_bases) {
-            grads_phase_.ptrs.push_back(base + offset);
-        }
+    for (std::size_t i = 0; i < grad_bases_x.size(); ++i) {
+        grads_phase_.ptrs.push_back(grad_bases_x[i]);
+        grads_phase_.ptrs.push_back(grad_bases_y[i]);
+        grads_phase_.ptrs.push_back(grad_bases_z[i]);
     }
+
     grads_phase_.ptrs.insert(grads_phase_.ptrs.end(), limiters.begin(), limiters.end());
     resize_phase(grads_phase_, "gradients/limiters");
 }

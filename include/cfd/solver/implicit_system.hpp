@@ -3,14 +3,12 @@
 #include <mpi.h>
 
 #include <algorithm>
-#include <cmath>
+#include <cassert>
 #include <cstddef>
-#include <cstring>
 #include <memory>
 #include <vector>
 
 #include "cfd/core/types.hpp"
-//#include "cfd/linalg/config.hpp"
 #include "cfd/linalg/config.hpp"
 #include "cfd/linalg/preconditioners.hpp"
 #include "cfd/mesh/localmesh.hpp"
@@ -21,33 +19,47 @@
 #include "cfd/linalg/bsr_matrix.hpp"
 #include "cfd/linalg/bicgstab.hpp"
 
-
-
 namespace cfd::solver {
 
 using linalg::detail::mpi_index_type;
 
 /**
- * @class MeanFlowSystem
- * @brief Builds, fills and solves the distributed 5x5 block system of one
- *        implicit step for the mean flow.
+ * @class BlockLinearSystem
+ * @brief Generic distributed block linear system (A * x = b) assembled on cell-cell face graph.
+ *
+ * Applicable to:
+ * - Compressible implicit mean flow (BlockDim = 5)
+ * - Incompressible pressure Poisson equation (BlockDim = 1)
+ * - Segregated momentum equations (BlockDim = 1)
+ * - Turbulence transport models (BlockDim = 1 or 2)
+ *
+ * @tparam BlockDim Number of degrees of freedom per mesh cell (block size).
  */
-class MeanFlowSystem {
+template <std::size_t BlockDim = 1>
+class BlockLinearSystem {
 public:
-    static constexpr std::size_t kNumVars = constants::kNumVars;
-    static constexpr std::size_t kBlockSize = static_cast<std::size_t>(kNumVars) * static_cast<std::size_t>(kNumVars);
-    static constexpr mesh::AuxConnType kAuxConnectivity = mesh::AuxConnType::CellCellsByFace;   // dual graph
-
+    static constexpr std::size_t kBlockDim  = BlockDim;
+    static constexpr std::size_t kBlockSize = BlockDim * BlockDim;
+    static constexpr mesh::AuxConnType kAuxConnectivity = mesh::AuxConnType::CellCellsByFace;
+    
     /**
-     * @param mesh              Rank-local mesh (faces, ghost maps, global ids).
-     * @param aux_conn          Auxiliary mesh connectivities
-     * @param comm              Solver communicator.
+     * @param mesh          Local partitioned mesh partition.
+     * @param aux_conn      Cell-to-cell dual connectivity through faces.
+     * @param solver_params Krylov solver and preconditioner parameters.
+     * @param comm          MPI communicator.
      */
-    MeanFlowSystem(const mesh::MeshPart& mesh, const mesh::MeshAuxConnectivity& aux_conn, const linalg::SolverParams& solver_params, MPI_Comm comm)
-        : mesh_(mesh), aux_conn_(aux_conn), solver_params_(solver_params), comm_(comm), n_own_(static_cast<std::size_t>(mesh.n_own)) {
-        matrix_ = std::make_unique<linalg::BsrMatrix>(comm_, mesh_.n_cells_g, n_own_, kNumVars);
+    BlockLinearSystem(const mesh::MeshPart& mesh,
+                      const mesh::MeshAuxConnectivity& aux_conn,
+                      const linalg::SolverParams& solver_params,
+                      MPI_Comm comm)
+                        : mesh_(mesh),
+                        aux_conn_(aux_conn),
+                        solver_params_(solver_params),
+                        comm_(comm),
+                        n_own_(static_cast<std::size_t>(mesh.n_own)) {
+        matrix_ = std::make_unique<linalg::BsrMatrix>(comm_, mesh_.n_cells_g, n_own_, kBlockDim);
 
-        const std::vector<cfd::GlobalIndex> ghost_gids = build_ghost_gids(mesh_, comm);
+        const std::vector<GlobalIndex> ghost_gids = build_ghost_gids(mesh_, comm);
         matrix_->assemble(ghost_gids, aux_conn_.cell_cells_face_offsets, aux_conn_.cell_cells_face);
  
         rhs_ = matrix_->makeVector();
@@ -69,22 +81,35 @@ public:
         built_ = true;
     }
 
+    /** @brief Zero-out matrix entries and RHS before assembling a new time step/iteration. */
+    void zero() noexcept {
+        std::fill(matrix_->valuesData(), matrix_->valuesData() + matrix_->values().size(), 0.0);
+        rhs_.setZero();
+        du_.setZero();
+    }
+
+    /**
+     * @brief Solves the linear system A * du = rhs.
+     * @return true if solver converged within tolerance.
+     */
     bool solve() {
         preconditioner_->setup(*matrix_);
         last_ = solver_->solve(*matrix_, *preconditioner_, du_, rhs_);
         return last_.status == linalg::SolverStatus::Converged;
     }
 
-    linalg::BsrMatrix& matrix() noexcept { return *matrix_; }
-    const linalg::BsrMatrix& matrix() const noexcept { return *matrix_; }
+    [[nodiscard]] cfd::linalg::BsrMatrix& matrix() noexcept { return *matrix_; }
+    [[nodiscard]] const cfd::linalg::BsrMatrix& matrix() const noexcept { return *matrix_; }
 
-    double* rhs_data() noexcept { return rhs_.data(); }  
-    const double* rhs_data() const noexcept { return rhs_.data(); }  
-    double* du_data() noexcept { return du_.data(); }  
-    const double* du_data() const noexcept { return du_.data(); }  
+    [[nodiscard]] double* rhs_data() noexcept { return rhs_.data(); }
+    [[nodiscard]] const double* rhs_data() const noexcept { return rhs_.data(); }
+    
+    [[nodiscard]] double* du_data() noexcept { return du_.data(); }
+    [[nodiscard]] const double* du_data() const noexcept { return du_.data(); }
 
-    std::size_t nown() const noexcept { return n_own_; }
-
+    [[nodiscard]] std::size_t n_own() const noexcept { return n_own_; }
+    [[nodiscard]] const cfd::linalg::IterationResult& last_result() const noexcept { return last_; }
+    
 private:
     const mesh::MeshPart& mesh_;
     const mesh::MeshAuxConnectivity& aux_conn_;

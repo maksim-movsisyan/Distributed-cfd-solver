@@ -197,13 +197,11 @@ SolverConfig parse_solver_config(const std::string& path, const MPI_Comm comm) {
         const std::string scheme = req_string(*t, "scheme", ctx, comm);
         if (scheme == "FORWARD_EULER") {
             cfg.scheme = TimeScheme::ForwardEuler;
-        } else if (scheme == "SSP_RK3") {
-            cfg.scheme = TimeScheme::SspRk3;
         } else if (scheme == "BACKWARD_EULER") {
             cfg.scheme = TimeScheme::BackwardEuler;
         } else {
             fail(comm, ctx + ": unsupported scheme '" + scheme +
-                           "' (available: FORWARD_EULER, SSP_RK3, BACKWARD_EULER)");
+                           "' (available: FORWARD_EULER, BACKWARD_EULER)");
         }
         cfg.cfl = req_number(*t, "cfl", ctx, comm);
         check_positive(cfg.cfl, "cfl", ctx, comm);

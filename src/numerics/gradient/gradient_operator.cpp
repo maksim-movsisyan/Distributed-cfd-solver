@@ -46,7 +46,6 @@ inline bool invert3x3(const double A[9], double invA[9]) noexcept {
     return true;
 }
 
-constexpr std::size_t kMaxBatchVariables    = 16;
 constexpr std::size_t kMaxCellFaceNeighbors = 64;
 constexpr std::size_t kMaxCellNodeNeighbors = 128;
 
@@ -56,99 +55,16 @@ constexpr std::size_t kMaxCellNodeNeighbors = 128;
 // Green-Gauss Cell-Based (CB)
 // =============================================================================
 
-void GreenGaussCellGradient::setup(const mesh::MeshPart& mesh, mesh::MeshAuxConnectivity& aux_conn) {
-    if (!aux_conn.has_cell_faces()) {
-        build_cell_faces_conn(mesh, aux_conn.cell_faces_offsets, aux_conn.cell_faces);
-        aux_conn.active_mask = aux_conn.active_mask | mesh::AuxConnType::CellFaces;
-    }
-}
+namespace {
 
-void GreenGaussCellGradient::apply(const double* const CFD_RESTRICT s, 
-                                   double* const CFD_RESTRICT g, 
-                                   const std::size_t stride, 
-                                   const mesh::MeshPart& mesh, 
-                                   const mesh::MeshAuxConnectivity& aux_conn) const {
-    assert(aux_conn.has_cell_faces() && "GreenGaussCellGradient requires CellFaces connectivity!");
-    
-    const std::size_t n_own = static_cast<std::size_t>(mesh.n_own);
-    const std::size_t n_total = static_cast<std::size_t>(mesh.n_cells);
-    const std::size_t n_inner_faces = static_cast<std::size_t>(mesh.n_inner_faces);
-
-    const LocalIndex* CFD_RESTRICT cell_faces_ptr = aux_conn.cell_faces_offsets.data();
-    const LocalIndex* CFD_RESTRICT cell_faces     = aux_conn.cell_faces.data();
-    const LocalIndex* CFD_RESTRICT face_owner     = mesh.face_owner.data();
-    const LocalIndex* CFD_RESTRICT face_neigh     = mesh.face_neigh.data();
-
-    const double* CFD_RESTRICT face_area     = mesh.face_area.data();
-    const double* CFD_RESTRICT face_normal_x = mesh.face_normal_x.data();
-    const double* CFD_RESTRICT face_normal_y = mesh.face_normal_y.data();
-    const double* CFD_RESTRICT face_normal_z = mesh.face_normal_z.data();
-    const double* CFD_RESTRICT cell_volume   = mesh.cell_volume.data();
-
-    // loop over all local cells
-    for (std::size_t idx = 0; idx < n_own; ++idx) {
-        const double fi_self = s[idx];
-
-        const std::size_t ptr1 = static_cast<std::size_t>(cell_faces_ptr[idx]);
-        const std::size_t ptr2 = static_cast<std::size_t>(cell_faces_ptr[idx + 1]);
-
-        double g_x = 0.0, g_y = 0.0, g_z = 0.0;
-
-        // loop over all local cell faces
-        for (std::size_t f_ptr = ptr1; f_ptr < ptr2; ++f_ptr) {
-            const std::size_t face_idx = static_cast<std::size_t>(cell_faces[f_ptr]);
-
-            const double area = face_area[face_idx];
-            const double nx = face_normal_x[face_idx];
-            const double ny = face_normal_y[face_idx];
-            const double nz = face_normal_z[face_idx];
-
-            const LocalIndex owner = face_owner[face_idx];
-            const LocalIndex neigh = face_neigh[face_idx];
-            const double sign      = (static_cast<LocalIndex>(idx) == owner) ? 1.0 : -1.0;
-
-            std::size_t idx2;
-            if (neigh >= 0) {
-                idx2 = (static_cast<LocalIndex>(idx) == owner) 
-                        ? static_cast<std::size_t>(neigh) : static_cast<std::size_t>(owner);
-            } else {
-                idx2 = n_total + face_idx - n_inner_faces;
-            }
-
-            const double fi_face = 0.5 * (fi_self + s[idx2]);
-
-            const double flux = sign * area * fi_face;
-            g_x += flux * nx;
-            g_y += flux * ny;
-            g_z += flux * nz;
-        } // end loop over all local cell faces
-
-        const double vol_inv = 1.0 / cell_volume[idx];
-        g[idx]              = g_x * vol_inv;
-        g[idx + stride]     = g_y * vol_inv;
-        g[idx + 2 * stride] = g_z * vol_inv;
-    } // end loop over all local cells
-}
-
-void GreenGaussCellGradient::apply_set(std::span<const double*> s, 
-                                       std::span<double*> g, 
-                                       const std::size_t stride,
-                                       const mesh::MeshPart& mesh, 
-                                       const mesh::MeshAuxConnectivity& aux_conn) const {
-    assert(aux_conn.has_cell_faces() && "GreenGaussCellGradient requires CellFaces connectivity!");
-
-    const std::size_t n_vars = s.size();
-    assert(n_vars == g.size() && "Mismatched span sizes in apply_set!");
-    if (n_vars == 0) return;
-    assert(n_vars <= kMaxBatchVariables && "Batch size exceeds stack capacity!");
-
-    const double* CFD_RESTRICT s_ptrs[kMaxBatchVariables];
-    double*       CFD_RESTRICT g_ptrs[kMaxBatchVariables];
-    for (std::size_t v = 0; v < n_vars; ++v) {
-        s_ptrs[v] = s[v];
-        g_ptrs[v] = g[v];
-    }
-
+template <std::size_t NVars>
+void apply_kernel_ggcb(
+    const double* CFD_RESTRICT const* CFD_RESTRICT s_ptrs,
+    double* CFD_RESTRICT const* CFD_RESTRICT g_ptrs_x,
+    double* CFD_RESTRICT const* CFD_RESTRICT g_ptrs_y,
+    double* CFD_RESTRICT const* CFD_RESTRICT g_ptrs_z,
+    const mesh::MeshPart& mesh,
+    const mesh::MeshAuxConnectivity& aux_conn) noexcept {
     const auto n_own         = static_cast<std::size_t>(mesh.n_own);
     const auto n_total       = static_cast<std::size_t>(mesh.n_cells);
     const auto n_inner_faces = static_cast<std::size_t>(mesh.n_inner_faces);
@@ -164,15 +80,20 @@ void GreenGaussCellGradient::apply_set(std::span<const double*> s,
     const double* CFD_RESTRICT face_normal_z = mesh.face_normal_z.data();
     const double* CFD_RESTRICT cell_volume   = mesh.cell_volume.data();
 
-
     for (std::size_t idx = 0; idx < n_own; ++idx) {
-        double gx[kMaxBatchVariables] = {0.0};
-        double gy[kMaxBatchVariables] = {0.0};
-        double gz[kMaxBatchVariables] = {0.0};
+        double gx[NVars] = {0.0};
+        double gy[NVars] = {0.0};
+        double gz[NVars] = {0.0};
+
+        double fi_self[NVars];
+
+        for (std::size_t v = 0; v < NVars; ++v) {
+            fi_self[v] = s_ptrs[v][idx];
+        }
 
         const auto ptr1 = static_cast<std::size_t>(cell_faces_off[idx]);
         const auto ptr2 = static_cast<std::size_t>(cell_faces_off[idx + 1]);
-
+        
         for (std::size_t f_ptr = ptr1; f_ptr < ptr2; ++f_ptr) {
             const auto face_idx = static_cast<std::size_t>(cell_faces[f_ptr]);
 
@@ -183,23 +104,18 @@ void GreenGaussCellGradient::apply_set(std::span<const double*> s,
 
             const LocalIndex owner = face_owner[face_idx];
             const LocalIndex neigh = face_neigh[face_idx];
-            const double sign      = (static_cast<LocalIndex>(idx) == owner) ? 1.0 : -1.0;
+            const double sign_05      = (static_cast<LocalIndex>(idx) == owner) ? 0.5 : -0.5;
 
-            const double geom_x = sign * area * nx;
-            const double geom_y = sign * area * ny;
-            const double geom_z = sign * area * nz;
+            const double geom_x = sign_05 * area * nx;
+            const double geom_y = sign_05 * area * ny;
+            const double geom_z = sign_05 * area * nz;
 
-            std::size_t idx2;
-            if (neigh >= 0) {
-                idx2 = (static_cast<LocalIndex>(idx) == owner) 
-                           ? static_cast<std::size_t>(neigh) 
-                           : static_cast<std::size_t>(owner);
-            } else {
-                idx2 = n_total + face_idx - n_inner_faces;
-            }
+            const std::size_t idx2 = (neigh >= 0)
+                ? (static_cast<LocalIndex>(idx) == owner ? static_cast<std::size_t>(neigh) : static_cast<std::size_t>(owner))
+                : (n_total + face_idx - n_inner_faces);
 
-            for (std::size_t v = 0; v < n_vars; ++v) {
-                const double fi_face = 0.5 * (s_ptrs[v][idx] + s_ptrs[v][idx2]);
+            for (std::size_t v = 0; v < NVars; ++v) {
+                const double fi_face = (fi_self[v] + s_ptrs[v][idx2]);
                 gx[v] += geom_x * fi_face;
                 gy[v] += geom_y * fi_face;
                 gz[v] += geom_z * fi_face;
@@ -207,11 +123,66 @@ void GreenGaussCellGradient::apply_set(std::span<const double*> s,
         }
 
         const double vol_inv = 1.0 / cell_volume[idx];
-        for (std::size_t v = 0; v < n_vars; ++v) {
-            g_ptrs[v][idx]              = gx[v] * vol_inv;
-            g_ptrs[v][idx + stride]     = gy[v] * vol_inv;
-            g_ptrs[v][idx + 2 * stride] = gz[v] * vol_inv;
+        for (std::size_t v = 0; v < NVars; ++v) {
+            g_ptrs_x[v][idx] = gx[v] * vol_inv;
+            g_ptrs_y[v][idx] = gy[v] * vol_inv;
+            g_ptrs_z[v][idx] = gz[v] * vol_inv;
         }
+    }
+}
+
+void apply_dynamic_ggcb(
+    std::span<const double* const> s,
+    std::span<double* const> gx,
+    std::span<double* const> gy,
+    std::span<double* const> gz,
+    const mesh::MeshPart& mesh,
+    const mesh::MeshAuxConnectivity& aux_conn) noexcept {
+    std::size_t v = 0;
+    for (; v + 4 <= s.size(); v += 4) {
+        apply_kernel_ggcb<4>(s.data() + v, gx.data() + v, gy.data() + v, gz.data() + v, mesh, aux_conn);
+    }
+    for (; v < s.size(); ++v) {
+        apply_kernel_ggcb<1>(s.data() + v, gx.data() + v, gy.data() + v, gz.data() + v, mesh, aux_conn);
+    }
+}
+
+} // anonymous namespace 
+
+void GreenGaussCellGradient::setup(const mesh::MeshPart& mesh, mesh::MeshAuxConnectivity& aux_conn) {
+    aux_conn.add_connectivity(mesh, mesh::AuxConnType::CellFaces);
+}
+
+void GreenGaussCellGradient::apply(const double* s, 
+                                   double* CFD_RESTRICT gx,
+                                   double* CFD_RESTRICT gy,
+                                   double* CFD_RESTRICT gz,
+                                   const mesh::MeshPart& mesh, 
+                                   const mesh::MeshAuxConnectivity& aux_conn) const {
+    apply_kernel_ggcb<1>(&s, &gx, &gy, &gz, mesh, aux_conn);
+}
+
+void GreenGaussCellGradient::apply_set(std::span<const double* const> s, 
+                                       std::span<double* const> gx,
+                                       std::span<double* const> gy,
+                                       std::span<double* const> gz,
+                                       const mesh::MeshPart& mesh, 
+                                       const mesh::MeshAuxConnectivity& aux_conn) const {
+    assert(s.size() == gx.size() && s.size() == gy.size() && s.size() == gz.size() && "Mismatched span sizes in apply_set");
+    const std::size_t n_vars = s.size();
+
+    switch (n_vars) {
+        case 0: return;
+        case 1: apply_kernel_ggcb<1>(s.data(), gx.data(), gy.data(), gz.data(), mesh, aux_conn); break;
+        case 2: apply_kernel_ggcb<2>(s.data(), gx.data(), gy.data(), gz.data(), mesh, aux_conn); break;
+        case 3: apply_kernel_ggcb<3>(s.data(), gx.data(), gy.data(), gz.data(), mesh, aux_conn); break; // 3D Velocity
+        case 4: apply_kernel_ggcb<4>(s.data(), gx.data(), gy.data(), gz.data(), mesh, aux_conn); break;
+        case 5: apply_kernel_ggcb<5>(s.data(), gx.data(), gy.data(), gz.data(), mesh, aux_conn); break; // 3D Navier-Stokes
+        case 6: apply_kernel_ggcb<6>(s.data(), gx.data(), gy.data(), gz.data(), mesh, aux_conn); break; // NS + SA
+        case 7: apply_kernel_ggcb<7>(s.data(), gx.data(), gy.data(), gz.data(), mesh, aux_conn); break; // NS + k-omega SST
+        default:
+            apply_dynamic_ggcb(s, gx, gy, gz, mesh, aux_conn);
+            break;
     }
 }
 
@@ -220,104 +191,15 @@ void GreenGaussCellGradient::apply_set(std::span<const double*> s,
 // Green-Gauss Face-Based (FB)
 // =============================================================================
 
-void GreenGaussFaceGradient::setup(const mesh::MeshPart&, mesh::MeshAuxConnectivity&) {}
+namespace {
 
-void GreenGaussFaceGradient::apply(const double* const CFD_RESTRICT s, double* const CFD_RESTRICT g, const std::size_t stride, 
-                                   const mesh::MeshPart& mesh, const mesh::MeshAuxConnectivity&) const {
-    const std::size_t n_own = static_cast<std::size_t>(mesh.n_own);
-    const std::size_t n_total = static_cast<std::size_t>(mesh.n_cells);
-    const std::size_t n_inner_faces = static_cast<std::size_t>(mesh.n_inner_faces);
-    const std::size_t n_faces = static_cast<std::size_t>(mesh.n_faces);
-
-    const LocalIndex* CFD_RESTRICT face_owner = mesh.face_owner.data();
-    const LocalIndex* CFD_RESTRICT face_neigh = mesh.face_neigh.data();
-
-    const double* CFD_RESTRICT face_area     = mesh.face_area.data();
-    const double* CFD_RESTRICT face_normal_x = mesh.face_normal_x.data();
-    const double* CFD_RESTRICT face_normal_y = mesh.face_normal_y.data();
-    const double* CFD_RESTRICT face_normal_z = mesh.face_normal_z.data();
-    const double* CFD_RESTRICT cell_volume   = mesh.cell_volume.data();
-
-    std::fill_n(g, 3 * stride, 0.0);
-    
-    auto process_face = [&](std::size_t face_idx, LocalIndex neighbor_idx, double* CFD_RESTRICT out_val) {
-        
-        const LocalIndex owner = face_owner[face_idx];
-
-        const double area = face_area[face_idx];
-        const double nx   = face_normal_x[face_idx];
-        const double ny   = face_normal_y[face_idx];
-        const double nz   = face_normal_z[face_idx];
-
-        const double fi_owner = s[static_cast<std::size_t>(owner)];
-        const double fi_neigh = s[static_cast<std::size_t>(neighbor_idx)];
-        const double fi_face  = 0.5 * (fi_owner + fi_neigh);
-
-        const double val_x = area * fi_face * nx;
-        const double val_y = area * fi_face * ny;
-        const double val_z = area * fi_face * nz;
-
-        // Scatter to owner cell 
-        const std::size_t l_sz = static_cast<std::size_t>(owner);
-        g[l_sz]              += val_x;
-        g[l_sz + stride]     += val_y;
-        g[l_sz + 2 * stride] += val_z;
-
-        out_val[0] = val_x;
-        out_val[1] = val_y;
-        out_val[2] = val_z;
-    };
-
-    // loop over all inner faces
-    for (std::size_t face_idx = 0; face_idx < n_inner_faces; ++face_idx) {
-        const LocalIndex neighbor = face_neigh[face_idx];
-        double flux[3];
-        
-        process_face(face_idx, neighbor, flux);
-
-        // Scatter to neighbor cell
-        const std::size_t r_sz = static_cast<std::size_t>(neighbor);
-        g[r_sz]              -= flux[0];
-        g[r_sz + stride]     -= flux[1];
-        g[r_sz + 2 * stride] -= flux[2];
-    } // end loop over all inner faces
-
-    // loop over all boundary faces
-    for (std::size_t face_idx = n_inner_faces; face_idx < n_faces; ++face_idx) {
-        const LocalIndex neighbor = static_cast<LocalIndex>(n_total + face_idx - n_inner_faces);
-        double dummy_flux[3]; // Stack allocation, optimized away by compiler
-        
-        process_face(face_idx, neighbor, dummy_flux);
-    } // end loop over all inner faces
-
-
-    // normalize by cell volume
-    for (std::size_t idx = 0; idx < n_own; ++idx) {
-        const double cv_inv = 1.0 / cell_volume[idx];
-        g[idx]              *= cv_inv;
-        g[idx + stride]     *= cv_inv;
-        g[idx + 2 * stride] *= cv_inv;
-    }
-}
-
-void GreenGaussFaceGradient::apply_set(std::span<const double*> s, 
-                                       std::span<double*> g, 
-                                       const std::size_t stride,
-                                       const mesh::MeshPart& mesh, 
-                                       const mesh::MeshAuxConnectivity&) const {
-    const std::size_t n_vars = s.size();
-    assert(n_vars == g.size() && "Mismatched span sizes in apply_set!");
-    if (n_vars == 0) return;
-    assert(n_vars <= kMaxBatchVariables && "Batch size exceeds stack capacity!");
-
-    const double* CFD_RESTRICT s_ptrs[kMaxBatchVariables];
-    double*       CFD_RESTRICT g_ptrs[kMaxBatchVariables];
-    for (std::size_t v = 0; v < n_vars; ++v) {
-        s_ptrs[v] = s[v];
-        g_ptrs[v] = g[v];
-        std::fill_n(g_ptrs[v], 3 * stride, 0.0);
-    }
-
+template <std::size_t NVars>
+void apply_kernel_ggfb(
+    const double* CFD_RESTRICT const* CFD_RESTRICT s_ptrs,
+    double* CFD_RESTRICT const* CFD_RESTRICT g_ptrs_x,
+    double* CFD_RESTRICT const* CFD_RESTRICT g_ptrs_y,
+    double* CFD_RESTRICT const* CFD_RESTRICT g_ptrs_z,
+    const mesh::MeshPart& mesh) noexcept {
     const auto n_own         = static_cast<std::size_t>(mesh.n_own);
     const auto n_total       = static_cast<std::size_t>(mesh.n_cells);
     const auto n_inner_faces = static_cast<std::size_t>(mesh.n_inner_faces);
@@ -332,62 +214,118 @@ void GreenGaussFaceGradient::apply_set(std::span<const double*> s,
     const double* CFD_RESTRICT face_normal_z = mesh.face_normal_z.data();
     const double* CFD_RESTRICT cell_volume   = mesh.cell_volume.data();
 
-    // 1. Inner faces batch processing
+    for (std::size_t v = 0; v < NVars; ++v) {
+        std::fill_n(g_ptrs_x[v], n_total, 0.0);
+        std::fill_n(g_ptrs_y[v], n_total, 0.0);
+        std::fill_n(g_ptrs_z[v], n_total, 0.0);
+    }
+
     for (std::size_t face_idx = 0; face_idx < n_inner_faces; ++face_idx) {
         const auto owner = static_cast<std::size_t>(face_owner[face_idx]);
         const auto neigh = static_cast<std::size_t>(face_neigh[face_idx]);
 
-        const double area = face_area[face_idx];
-        const double nx   = face_normal_x[face_idx];
-        const double ny   = face_normal_y[face_idx];
-        const double nz   = face_normal_z[face_idx];
+        const double area_05 = 0.5 * face_area[face_idx];
+        const double h_geom_x = area_05 * face_normal_x[face_idx];
+        const double h_geom_y = area_05 * face_normal_y[face_idx];
+        const double h_geom_z = area_05 * face_normal_z[face_idx];
 
-        for (std::size_t v = 0; v < n_vars; ++v) {
-            const double fi_face = 0.5 * (s_ptrs[v][owner] + s_ptrs[v][neigh]);
-            const double fx = area * fi_face * nx;
-            const double fy = area * fi_face * ny;
-            const double fz = area * fi_face * nz;
+        for (std::size_t v = 0; v < NVars; ++v) {
+            const double fi_sum = s_ptrs[v][owner] + s_ptrs[v][neigh];
+            const double fx = h_geom_x * fi_sum;
+            const double fy = h_geom_y * fi_sum;
+            const double fz = h_geom_z * fi_sum;
 
-            g_ptrs[v][owner]              += fx;
-            g_ptrs[v][owner + stride]     += fy;
-            g_ptrs[v][owner + 2 * stride] += fz;
+            g_ptrs_x[v][owner] += fx;
+            g_ptrs_y[v][owner] += fy;
+            g_ptrs_z[v][owner] += fz;
 
-            g_ptrs[v][neigh]              -= fx;
-            g_ptrs[v][neigh + stride]     -= fy;
-            g_ptrs[v][neigh + 2 * stride] -= fz;
+            g_ptrs_x[v][neigh] -= fx;
+            g_ptrs_y[v][neigh] -= fy;
+            g_ptrs_z[v][neigh] -= fz;
         }
     }
 
-    // 2. Boundary faces batch processing
     for (std::size_t face_idx = n_inner_faces; face_idx < n_faces; ++face_idx) {
         const auto owner = static_cast<std::size_t>(face_owner[face_idx]);
         const std::size_t b_idx = n_total + face_idx - n_inner_faces;
 
-        const double area = face_area[face_idx];
-        const double nx   = face_normal_x[face_idx];
-        const double ny   = face_normal_y[face_idx];
-        const double nz   = face_normal_z[face_idx];
+        const double area_05 = 0.5 * face_area[face_idx];
+        const double h_geom_x = area_05 * face_normal_x[face_idx];
+        const double h_geom_y = area_05 * face_normal_y[face_idx];
+        const double h_geom_z = area_05 * face_normal_z[face_idx];
 
-        for (std::size_t v = 0; v < n_vars; ++v) {
-            const double fi_face = 0.5 * (s_ptrs[v][owner] + s_ptrs[v][b_idx]);
-            const double fx = area * fi_face * nx;
-            const double fy = area * fi_face * ny;
-            const double fz = area * fi_face * nz;
+        for (std::size_t v = 0; v < NVars; ++v) {
+            const double fi_sum = s_ptrs[v][owner] + s_ptrs[v][b_idx];
+            const double fx = h_geom_x * fi_sum;
+            const double fy = h_geom_y * fi_sum;
+            const double fz = h_geom_z * fi_sum;
 
-            g_ptrs[v][owner]              += fx;
-            g_ptrs[v][owner + stride]     += fy;
-            g_ptrs[v][owner + 2 * stride] += fz;
+            g_ptrs_x[v][owner] += fx;
+            g_ptrs_y[v][owner] += fy;
+            g_ptrs_z[v][owner] += fz;
         }
     }
 
-    // 3. Normalize owned cells by volume
     for (std::size_t i = 0; i < n_own; ++i) {
         const double cv_inv = 1.0 / cell_volume[i];
-        for (std::size_t v = 0; v < n_vars; ++v) {
-            g_ptrs[v][i]              *= cv_inv;
-            g_ptrs[v][i + stride]     *= cv_inv;
-            g_ptrs[v][i + 2 * stride] *= cv_inv;
+
+        for (std::size_t v = 0; v < NVars; ++v) {
+            g_ptrs_x[v][i] *= cv_inv;
+            g_ptrs_y[v][i] *= cv_inv;
+            g_ptrs_z[v][i] *= cv_inv;
         }
+    }
+}
+
+void apply_dynamic_ggfb(
+    std::span<const double* const> s,
+    std::span<double* const> gx,
+    std::span<double* const> gy,
+    std::span<double* const> gz,
+    const mesh::MeshPart& mesh) noexcept {
+    std::size_t v = 0;
+    for (; v + 4 <= s.size(); v += 4) {
+        apply_kernel_ggfb<4>(s.data() + v, gx.data() + v, gy.data() + v, gz.data() + v, mesh);
+    }
+    for (; v < s.size(); ++v) {
+        apply_kernel_ggfb<1>(s.data() + v, gx.data() + v, gy.data() + v, gz.data() + v, mesh);
+    }
+}
+
+} // anonymous namespace
+
+void GreenGaussFaceGradient::setup(const mesh::MeshPart&, mesh::MeshAuxConnectivity&) {}
+
+void GreenGaussFaceGradient::apply(const double* s, 
+                                   double* CFD_RESTRICT gx,
+                                   double* CFD_RESTRICT gy,
+                                   double* CFD_RESTRICT gz,
+                                   const mesh::MeshPart& mesh, 
+                                   const mesh::MeshAuxConnectivity&) const {
+    apply_kernel_ggfb<1>(&s, &gx, &gy, &gz, mesh);
+}
+
+void GreenGaussFaceGradient::apply_set(std::span<const double* const> s, 
+                                       std::span<double* const> gx,
+                                       std::span<double* const> gy,
+                                       std::span<double* const> gz,
+                                       const mesh::MeshPart& mesh, 
+                                       const mesh::MeshAuxConnectivity&) const {
+    assert(s.size() == gx.size() && s.size() == gy.size() && s.size() == gz.size() && "Mismatched span sizes in apply_set");
+    const std::size_t n_vars = s.size();
+
+    switch (n_vars) {
+        case 0: return;
+        case 1: apply_kernel_ggfb<1>(s.data(), gx.data(), gy.data(), gz.data(), mesh); break;
+        case 2: apply_kernel_ggfb<2>(s.data(), gx.data(), gy.data(), gz.data(), mesh); break;
+        case 3: apply_kernel_ggfb<3>(s.data(), gx.data(), gy.data(), gz.data(), mesh); break; // 3D Velocity
+        case 4: apply_kernel_ggfb<4>(s.data(), gx.data(), gy.data(), gz.data(), mesh); break;
+        case 5: apply_kernel_ggfb<5>(s.data(), gx.data(), gy.data(), gz.data(), mesh); break; // 3D Navier-Stokes
+        case 6: apply_kernel_ggfb<6>(s.data(), gx.data(), gy.data(), gz.data(), mesh); break; // NS + SA
+        case 7: apply_kernel_ggfb<7>(s.data(), gx.data(), gy.data(), gz.data(), mesh); break; // NS + k-omega SST
+        default:
+            apply_dynamic_ggfb(s, gx, gy, gz, mesh);
+            break;
     }
 }
 
@@ -396,12 +334,86 @@ void GreenGaussFaceGradient::apply_set(std::span<const double*> s,
 // Weighted Least-Squares (LSQ)
 // =============================================================================
 
-void LeastSquaresCellFaceGradient::setup(const mesh::MeshPart& mesh, mesh::MeshAuxConnectivity& aux_conn) {
-    if (!aux_conn.has_cell_cells_face()) {
-        build_cell_cells_face_conn(mesh, aux_conn.cell_cells_face_offsets, aux_conn.cell_cells_face);
-        aux_conn.active_mask = aux_conn.active_mask | mesh::AuxConnType::CellCellsByFace;
-    }
+namespace {
 
+template <std::size_t NVars>
+void apply_kernel_lsqf(
+    const double* CFD_RESTRICT const* CFD_RESTRICT s_ptrs,
+    double* CFD_RESTRICT const* CFD_RESTRICT g_ptrs_x,
+    double* CFD_RESTRICT const* CFD_RESTRICT g_ptrs_y,
+    double* CFD_RESTRICT const* CFD_RESTRICT g_ptrs_z,
+    const mesh::MeshPart& mesh,
+    const mesh::MeshAuxConnectivity& aux_conn,
+    const double* CFD_RESTRICT wx_ptr,
+    const double* CFD_RESTRICT wy_ptr,
+    const double* CFD_RESTRICT wz_ptr) noexcept {
+    const auto n_own = static_cast<std::size_t>(mesh.n_own);
+
+    const LocalIndex* CFD_RESTRICT offsets   = aux_conn.cell_cells_face_offsets.data();
+    const LocalIndex* CFD_RESTRICT neighbors = aux_conn.cell_cells_face.data();
+
+    for (std::size_t idx = 0; idx < n_own; ++idx) {
+        double gx[NVars] = {0.0};
+        double gy[NVars] = {0.0};
+        double gz[NVars] = {0.0};
+
+        double fi_self[NVars];
+
+        for (std::size_t v = 0; v < NVars; ++v) {
+            fi_self[v] = s_ptrs[v][idx];
+        }
+
+        const auto pos1 = static_cast<std::size_t>(offsets[idx]);
+        const auto pos2 = static_cast<std::size_t>(offsets[idx + 1]);
+
+        for (std::size_t j = pos1; j < pos2; ++j) {
+            const auto nb_idx = static_cast<std::size_t>(neighbors[j]);
+
+            const double wx = wx_ptr[j];
+            const double wy = wy_ptr[j];
+            const double wz = wz_ptr[j];
+
+
+            for (std::size_t v = 0; v < NVars; ++v) {
+                const double delta_fi = s_ptrs[v][nb_idx] - fi_self[v];
+                gx[v] += wx * delta_fi;
+                gy[v] += wy * delta_fi;
+                gz[v] += wz * delta_fi;
+            }
+        }
+
+        for (std::size_t v = 0; v < NVars; ++v) {
+            g_ptrs_x[v][idx] = gx[v];
+            g_ptrs_y[v][idx] = gy[v];
+            g_ptrs_z[v][idx] = gz[v];
+        }
+    }
+}
+
+void apply_dynamic_lsqf(
+    std::span<const double* const> s,
+    std::span<double* const> gx,
+    std::span<double* const> gy,
+    std::span<double* const> gz,
+    const mesh::MeshPart& mesh,
+    const mesh::MeshAuxConnectivity& aux_conn,
+    const double* CFD_RESTRICT wx_ptr,
+    const double* CFD_RESTRICT wy_ptr,
+    const double* CFD_RESTRICT wz_ptr) noexcept {
+    std::size_t v = 0;
+    for (; v + 4 <= s.size(); v += 4) {
+        apply_kernel_lsqf<4>(s.data() + v, gx.data() + v, gy.data() + v, gz.data() + v, mesh, aux_conn, wx_ptr, wy_ptr, wz_ptr);
+    }
+    for (; v < s.size(); ++v) {
+        apply_kernel_lsqf<1>(s.data() + v, gx.data() + v, gy.data() + v, gz.data() + v, mesh, aux_conn, wx_ptr, wy_ptr, wz_ptr);
+    }
+}
+
+} // anonymous namespace
+
+void LeastSquaresCellFaceGradient::setup(const mesh::MeshPart& mesh, mesh::MeshAuxConnectivity& aux_conn) {
+    aux_conn.add_connectivity(mesh, mesh::AuxConnType::CellCellsByFace);
+    
     const auto n_own = static_cast<std::size_t>(mesh.n_own);
     m_coeffs_off_    = aux_conn.cell_cells_face.size();
     m_coeffs_.assign(3 * m_coeffs_off_, 0.0);
@@ -419,7 +431,6 @@ void LeastSquaresCellFaceGradient::setup(const mesh::MeshPart& mesh, mesh::MeshA
 
     constexpr double eps = 1.0e-14;
 
-
     for (std::size_t c = 0; c < n_own; ++c) {
         const double x0 = cx[c];
         const double y0 = cy[c];
@@ -433,7 +444,6 @@ void LeastSquaresCellFaceGradient::setup(const mesh::MeshPart& mesh, mesh::MeshA
 
         double dr_buf[kMaxCellFaceNeighbors][3];
         double w_buf[kMaxCellFaceNeighbors];
-
         double A[9] = {0.0};
 
         for (std::size_t i = 0; i < n_nbs; ++i) {
@@ -488,105 +498,43 @@ void LeastSquaresCellFaceGradient::setup(const mesh::MeshPart& mesh, mesh::MeshA
     }
 }
 
-void LeastSquaresCellFaceGradient::apply(const double* const CFD_RESTRICT s, 
-                                         double* const CFD_RESTRICT g, 
-                                         const std::size_t stride, 
-                                         const mesh::MeshPart& mesh, 
-                                         const mesh::MeshAuxConnectivity& aux_conn) const {
-    assert(aux_conn.has_cell_cells_face() && "LSQ requires CellCellsByFace connectivity!");
-
-    const auto n_own = static_cast<std::size_t>(mesh.n_own);
-
-    const LocalIndex* CFD_RESTRICT offsets   = aux_conn.cell_cells_face_offsets.data();
-    const LocalIndex* CFD_RESTRICT neighbors = aux_conn.cell_cells_face.data();
-
+void LeastSquaresCellFaceGradient::apply(const double* s, 
+                                   double* CFD_RESTRICT gx,
+                                   double* CFD_RESTRICT gy,
+                                   double* CFD_RESTRICT gz,
+                                   const mesh::MeshPart& mesh, 
+                                   const mesh::MeshAuxConnectivity& aux_conn) const {
     const double* CFD_RESTRICT wx_ptr = m_coeffs_.data();
     const double* CFD_RESTRICT wy_ptr = m_coeffs_.data() + m_coeffs_off_;
     const double* CFD_RESTRICT wz_ptr = m_coeffs_.data() + 2 * m_coeffs_off_;
-
-
-    for (std::size_t idx = 0; idx < n_own; ++idx) {
-        const double fi_self = s[idx];
-        const auto pos1 = static_cast<std::size_t>(offsets[idx]);
-        const auto pos2 = static_cast<std::size_t>(offsets[idx + 1]);
-
-        double gx = 0.0, gy = 0.0, gz = 0.0;
-
-        for (std::size_t j = pos1; j < pos2; ++j) {
-            const auto nb_idx = static_cast<std::size_t>(neighbors[j]);
-            const double delta_fi = s[nb_idx] - fi_self;
-
-            gx += wx_ptr[j] * delta_fi;
-            gy += wy_ptr[j] * delta_fi;
-            gz += wz_ptr[j] * delta_fi;
-        }
-
-        g[idx]              = gx;
-        g[idx + stride]     = gy;
-        g[idx + 2 * stride] = gz;
-    }
+    apply_kernel_lsqf<1>(&s, &gx, &gy, &gz, mesh, aux_conn, wx_ptr, wy_ptr, wz_ptr);
 }
 
-void LeastSquaresCellFaceGradient::apply_set(std::span<const double*> s, 
-                                             std::span<double*> g, 
-                                             const std::size_t stride, 
-                                             const mesh::MeshPart& mesh, 
-                                             const mesh::MeshAuxConnectivity& aux_conn) const {
-    assert(aux_conn.has_cell_cells_face() && "LSQ requires CellCellsByFace connectivity!");
+void LeastSquaresCellFaceGradient::apply_set(std::span<const double* const> s, 
+                                       std::span<double* const> gx,
+                                       std::span<double* const> gy,
+                                       std::span<double* const> gz,
+                                       const mesh::MeshPart& mesh, 
+                                       const mesh::MeshAuxConnectivity& aux_conn) const {
+    assert(s.size() == gx.size() && s.size() == gy.size() && s.size() == gz.size() && "Mismatched span sizes in apply_set");
     const std::size_t n_vars = s.size();
-    assert(n_vars == g.size() && "Mismatched span sizes in apply_set!");
-    if (n_vars == 0) return;
-    assert(n_vars <= kMaxBatchVariables && "Batch size exceeds stack capacity!");
-
-    const double* CFD_RESTRICT s_ptrs[kMaxBatchVariables];
-    double*       CFD_RESTRICT g_ptrs[kMaxBatchVariables];
-    for (std::size_t v = 0; v < n_vars; ++v) {
-        s_ptrs[v] = s[v];
-        g_ptrs[v] = g[v];
-    }
-
-    const auto n_own = static_cast<std::size_t>(mesh.n_own);
-
-    const LocalIndex* CFD_RESTRICT offsets   = aux_conn.cell_cells_face_offsets.data();
-    const LocalIndex* CFD_RESTRICT neighbors = aux_conn.cell_cells_face.data();
-
+    
     const double* CFD_RESTRICT wx_ptr = m_coeffs_.data();
     const double* CFD_RESTRICT wy_ptr = m_coeffs_.data() + m_coeffs_off_;
     const double* CFD_RESTRICT wz_ptr = m_coeffs_.data() + 2 * m_coeffs_off_;
 
-
-    for (std::size_t idx = 0; idx < n_own; ++idx) {
-        double fi_self[kMaxBatchVariables];
-        double gx[kMaxBatchVariables] = {0.0};
-        double gy[kMaxBatchVariables] = {0.0};
-        double gz[kMaxBatchVariables] = {0.0};
-
-        for (std::size_t v = 0; v < n_vars; ++v) {
-            fi_self[v] = s_ptrs[v][idx];
-        }
-
-        const auto pos1 = static_cast<std::size_t>(offsets[idx]);
-        const auto pos2 = static_cast<std::size_t>(offsets[idx + 1]);
-
-        for (std::size_t j = pos1; j < pos2; ++j) {
-            const auto nb_idx = static_cast<std::size_t>(neighbors[j]);
-            const double wx   = wx_ptr[j];
-            const double wy   = wy_ptr[j];
-            const double wz   = wz_ptr[j];
-
-            for (std::size_t v = 0; v < n_vars; ++v) {
-                const double delta_fi = s_ptrs[v][nb_idx] - fi_self[v];
-                gx[v] += wx * delta_fi;
-                gy[v] += wy * delta_fi;
-                gz[v] += wz * delta_fi;
-            }
-        }
-
-        for (std::size_t v = 0; v < n_vars; ++v) {
-            g_ptrs[v][idx]              = gx[v];
-            g_ptrs[v][idx + stride]     = gy[v];
-            g_ptrs[v][idx + 2 * stride] = gz[v];
-        }
+    switch (n_vars) {
+        case 0: return;
+        case 1: apply_kernel_lsqf<1>(s.data(), gx.data(), gy.data(), gz.data(), mesh, aux_conn, wx_ptr, wy_ptr, wz_ptr); break;
+        case 2: apply_kernel_lsqf<2>(s.data(), gx.data(), gy.data(), gz.data(), mesh, aux_conn, wx_ptr, wy_ptr, wz_ptr); break;
+        case 3: apply_kernel_lsqf<3>(s.data(), gx.data(), gy.data(), gz.data(), mesh, aux_conn, wx_ptr, wy_ptr, wz_ptr); break; // 3D Velocity
+        case 4: apply_kernel_lsqf<4>(s.data(), gx.data(), gy.data(), gz.data(), mesh, aux_conn, wx_ptr, wy_ptr, wz_ptr); break;
+        case 5: apply_kernel_lsqf<5>(s.data(), gx.data(), gy.data(), gz.data(), mesh, aux_conn, wx_ptr, wy_ptr, wz_ptr); break; // 3D Navier-Stokes
+        case 6: apply_kernel_lsqf<6>(s.data(), gx.data(), gy.data(), gz.data(), mesh, aux_conn, wx_ptr, wy_ptr, wz_ptr); break; // NS + SA
+        case 7: apply_kernel_lsqf<7>(s.data(), gx.data(), gy.data(), gz.data(), mesh, aux_conn, wx_ptr, wy_ptr, wz_ptr); break; // NS + k-omega SST
+        default:
+            apply_dynamic_lsqf(s, gx, gy, gz, mesh, aux_conn, wx_ptr, wy_ptr, wz_ptr);
+            break;
     }
 }
 
@@ -595,13 +543,85 @@ void LeastSquaresCellFaceGradient::apply_set(std::span<const double*> s,
 // Weighted Least-Squares Cell-Node Gradient (Node-Sharing Stencil)
 // =============================================================================
 
-void LeastSquaresCellNodeGradient::setup(const mesh::MeshPart& mesh, mesh::MeshAuxConnectivity& aux_conn) {
-    // 1. Build Cell -> Cells (by node) connectivity if not present
-    if (!aux_conn.has_cell_cells_node()) {
-        build_cell_cells_node_conn(mesh, aux_conn.cell_cells_node_offsets, aux_conn.cell_cells_node);
-        aux_conn.active_mask = aux_conn.active_mask | mesh::AuxConnType::CellCellsByNode;
-    }
+namespace {
 
+template <std::size_t NVars>
+void apply_kernel_lsqn(
+    const double* CFD_RESTRICT const* CFD_RESTRICT s_ptrs,
+    double* CFD_RESTRICT const* CFD_RESTRICT g_ptrs_x,
+    double* CFD_RESTRICT const* CFD_RESTRICT g_ptrs_y,
+    double* CFD_RESTRICT const* CFD_RESTRICT g_ptrs_z,
+    const mesh::MeshPart& mesh,
+    const mesh::MeshAuxConnectivity& aux_conn,
+    const double* CFD_RESTRICT wx_ptr,
+    const double* CFD_RESTRICT wy_ptr,
+    const double* CFD_RESTRICT wz_ptr) noexcept {
+    const auto n_own = static_cast<std::size_t>(mesh.n_own);
+
+    const LocalIndex* CFD_RESTRICT offsets   = aux_conn.cell_cells_node_offsets.data();
+    const LocalIndex* CFD_RESTRICT neighbors = aux_conn.cell_cells_node.data();
+
+    for (std::size_t idx = 0; idx < n_own; ++idx) {
+        double gx[NVars] = {0.0};
+        double gy[NVars] = {0.0};
+        double gz[NVars] = {0.0};
+
+        double fi_self[NVars];
+
+        for (std::size_t v = 0; v < NVars; ++v) {
+            fi_self[v] = s_ptrs[v][idx];
+        }
+
+        const auto pos1 = static_cast<std::size_t>(offsets[idx]);
+        const auto pos2 = static_cast<std::size_t>(offsets[idx + 1]);
+
+        for (std::size_t j = pos1; j < pos2; ++j) {
+            const auto nb_idx = static_cast<std::size_t>(neighbors[j]);
+
+            const double wx = wx_ptr[j];
+            const double wy = wy_ptr[j];
+            const double wz = wz_ptr[j];
+
+            for (std::size_t v = 0; v < NVars; ++v) {
+                const double delta_fi = s_ptrs[v][nb_idx] - fi_self[v];
+                gx[v] += wx * delta_fi;
+                gy[v] += wy * delta_fi;
+                gz[v] += wz * delta_fi;
+            }
+        }
+
+        for (std::size_t v = 0; v < NVars; ++v) {
+            g_ptrs_x[v][idx] = gx[v];
+            g_ptrs_y[v][idx] = gy[v];
+            g_ptrs_z[v][idx] = gz[v];
+        }
+    }
+}
+
+void apply_dynamic_lsqn(
+    std::span<const double* const> s,
+    std::span<double* const> gx,
+    std::span<double* const> gy,
+    std::span<double* const> gz,
+    const mesh::MeshPart& mesh,
+    const mesh::MeshAuxConnectivity& aux_conn,
+    const double* CFD_RESTRICT wx_ptr,
+    const double* CFD_RESTRICT wy_ptr,
+    const double* CFD_RESTRICT wz_ptr) noexcept {
+    std::size_t v = 0;
+    for (; v + 4 <= s.size(); v += 4) {
+        apply_kernel_lsqn<4>(s.data() + v, gx.data() + v, gy.data() + v, gz.data() + v, mesh, aux_conn, wx_ptr, wy_ptr, wz_ptr);
+    }
+    for (; v < s.size(); ++v) {
+        apply_kernel_lsqn<1>(s.data() + v, gx.data() + v, gy.data() + v, gz.data() + v, mesh, aux_conn, wx_ptr, wy_ptr, wz_ptr);
+    }
+}
+
+} // anonymous namespace
+
+void LeastSquaresCellNodeGradient::setup(const mesh::MeshPart& mesh, mesh::MeshAuxConnectivity& aux_conn) {
+    aux_conn.add_connectivity(mesh, mesh::AuxConnType::CellCellsByNode);
+    
     const auto n_own = static_cast<std::size_t>(mesh.n_own);
     m_coeffs_off_    = aux_conn.cell_cells_node.size();
     m_coeffs_.assign(3 * m_coeffs_off_, 0.0);
@@ -619,7 +639,6 @@ void LeastSquaresCellNodeGradient::setup(const mesh::MeshPart& mesh, mesh::MeshA
 
     constexpr double eps = 1.0e-14;
 
-
     for (std::size_t c = 0; c < n_own; ++c) {
         const double x0 = cx[c];
         const double y0 = cy[c];
@@ -633,7 +652,6 @@ void LeastSquaresCellNodeGradient::setup(const mesh::MeshPart& mesh, mesh::MeshA
 
         double dr_buf[kMaxCellNodeNeighbors][3];
         double w_buf[kMaxCellNodeNeighbors];
-
         double A[9] = {0.0};
 
         for (std::size_t i = 0; i < n_nbs; ++i) {
@@ -688,105 +706,44 @@ void LeastSquaresCellNodeGradient::setup(const mesh::MeshPart& mesh, mesh::MeshA
     }
 }
 
-void LeastSquaresCellNodeGradient::apply(const double* const CFD_RESTRICT s, 
-                                         double* const CFD_RESTRICT g, 
-                                         const std::size_t stride, 
-                                         const mesh::MeshPart& mesh, 
-                                         const mesh::MeshAuxConnectivity& aux_conn) const {
-    assert(aux_conn.has_cell_cells_node() && "LSQ Node requires CellCellsByNode connectivity!");
-
-    const auto n_own = static_cast<std::size_t>(mesh.n_own);
-
-    const LocalIndex* CFD_RESTRICT offsets   = aux_conn.cell_cells_node_offsets.data();
-    const LocalIndex* CFD_RESTRICT neighbors = aux_conn.cell_cells_node.data();
-
+void LeastSquaresCellNodeGradient::apply(const double* s, 
+                                   double* CFD_RESTRICT gx,
+                                   double* CFD_RESTRICT gy,
+                                   double* CFD_RESTRICT gz,
+                                   const mesh::MeshPart& mesh, 
+                                   const mesh::MeshAuxConnectivity& aux_conn) const {
     const double* CFD_RESTRICT wx_ptr = m_coeffs_.data();
     const double* CFD_RESTRICT wy_ptr = m_coeffs_.data() + m_coeffs_off_;
     const double* CFD_RESTRICT wz_ptr = m_coeffs_.data() + 2 * m_coeffs_off_;
-
-
-    for (std::size_t idx = 0; idx < n_own; ++idx) {
-        const double fi_self = s[idx];
-        const auto pos1 = static_cast<std::size_t>(offsets[idx]);
-        const auto pos2 = static_cast<std::size_t>(offsets[idx + 1]);
-
-        double gx = 0.0, gy = 0.0, gz = 0.0;
-
-        for (std::size_t j = pos1; j < pos2; ++j) {
-            const auto nb_idx = static_cast<std::size_t>(neighbors[j]);
-            const double delta_fi = s[nb_idx] - fi_self;
-
-            gx += wx_ptr[j] * delta_fi;
-            gy += wy_ptr[j] * delta_fi;
-            gz += wz_ptr[j] * delta_fi;
-        }
-
-        g[idx]              = gx;
-        g[idx + stride]     = gy;
-        g[idx + 2 * stride] = gz;
-    }
+    apply_kernel_lsqn<1>(&s, &gx, &gy, &gz, mesh, aux_conn, wx_ptr, wy_ptr, wz_ptr);
 }
 
-void LeastSquaresCellNodeGradient::apply_set(std::span<const double*> s, 
-                                             std::span<double*> g, 
-                                             const std::size_t stride, 
-                                             const mesh::MeshPart& mesh, 
-                                             const mesh::MeshAuxConnectivity& aux_conn) const {
-    assert(aux_conn.has_cell_cells_node() && "LSQ Node requires CellCellsByNode connectivity!");
+void LeastSquaresCellNodeGradient::apply_set(std::span<const double* const> s, 
+                                       std::span<double* const> gx,
+                                       std::span<double* const> gy,
+                                       std::span<double* const> gz,
+                                       const mesh::MeshPart& mesh, 
+                                       const mesh::MeshAuxConnectivity& aux_conn) const {
+    assert(s.size() == gx.size() && s.size() == gy.size() && s.size() == gz.size() && "Mismatched span sizes in apply_set");
     const std::size_t n_vars = s.size();
-    assert(n_vars == g.size() && "Mismatched span sizes in apply_set!");
-    if (n_vars == 0) return;
-    assert(n_vars <= kMaxBatchVariables && "Batch size exceeds stack capacity!");
-
-    const double* CFD_RESTRICT s_ptrs[kMaxBatchVariables];
-    double*       CFD_RESTRICT g_ptrs[kMaxBatchVariables];
-    for (std::size_t v = 0; v < n_vars; ++v) {
-        s_ptrs[v] = s[v];
-        g_ptrs[v] = g[v];
-    }
-
-    const auto n_own = static_cast<std::size_t>(mesh.n_own);
-
-    const LocalIndex* CFD_RESTRICT offsets   = aux_conn.cell_cells_node_offsets.data();
-    const LocalIndex* CFD_RESTRICT neighbors = aux_conn.cell_cells_node.data();
-
+    
     const double* CFD_RESTRICT wx_ptr = m_coeffs_.data();
     const double* CFD_RESTRICT wy_ptr = m_coeffs_.data() + m_coeffs_off_;
     const double* CFD_RESTRICT wz_ptr = m_coeffs_.data() + 2 * m_coeffs_off_;
 
-
-    for (std::size_t idx = 0; idx < n_own; ++idx) {
-        double fi_self[kMaxBatchVariables];
-        double gx[kMaxBatchVariables] = {0.0};
-        double gy[kMaxBatchVariables] = {0.0};
-        double gz[kMaxBatchVariables] = {0.0};
-
-        for (std::size_t v = 0; v < n_vars; ++v) {
-            fi_self[v] = s_ptrs[v][idx];
-        }
-
-        const auto pos1 = static_cast<std::size_t>(offsets[idx]);
-        const auto pos2 = static_cast<std::size_t>(offsets[idx + 1]);
-
-        for (std::size_t j = pos1; j < pos2; ++j) {
-            const auto nb_idx = static_cast<std::size_t>(neighbors[j]);
-            const double wx   = wx_ptr[j];
-            const double wy   = wy_ptr[j];
-            const double wz   = wz_ptr[j];
-
-            for (std::size_t v = 0; v < n_vars; ++v) {
-                const double delta_fi = s_ptrs[v][nb_idx] - fi_self[v];
-                gx[v] += wx * delta_fi;
-                gy[v] += wy * delta_fi;
-                gz[v] += wz * delta_fi;
-            }
-        }
-
-        for (std::size_t v = 0; v < n_vars; ++v) {
-            g_ptrs[v][idx]              = gx[v];
-            g_ptrs[v][idx + stride]     = gy[v];
-            g_ptrs[v][idx + 2 * stride] = gz[v];
-        }
+    switch (n_vars) {
+        case 0: return;
+        case 1: apply_kernel_lsqn<1>(s.data(), gx.data(), gy.data(), gz.data(), mesh, aux_conn, wx_ptr, wy_ptr, wz_ptr); break;
+        case 2: apply_kernel_lsqn<2>(s.data(), gx.data(), gy.data(), gz.data(), mesh, aux_conn, wx_ptr, wy_ptr, wz_ptr); break;
+        case 3: apply_kernel_lsqn<3>(s.data(), gx.data(), gy.data(), gz.data(), mesh, aux_conn, wx_ptr, wy_ptr, wz_ptr); break; // 3D Velocity
+        case 4: apply_kernel_lsqn<4>(s.data(), gx.data(), gy.data(), gz.data(), mesh, aux_conn, wx_ptr, wy_ptr, wz_ptr); break;
+        case 5: apply_kernel_lsqn<5>(s.data(), gx.data(), gy.data(), gz.data(), mesh, aux_conn, wx_ptr, wy_ptr, wz_ptr); break; // 3D Navier-Stokes
+        case 6: apply_kernel_lsqn<6>(s.data(), gx.data(), gy.data(), gz.data(), mesh, aux_conn, wx_ptr, wy_ptr, wz_ptr); break; // NS + SA
+        case 7: apply_kernel_lsqn<7>(s.data(), gx.data(), gy.data(), gz.data(), mesh, aux_conn, wx_ptr, wy_ptr, wz_ptr); break; // NS + k-omega SST
+        default:
+            apply_dynamic_lsqn(s, gx, gy, gz, mesh, aux_conn, wx_ptr, wy_ptr, wz_ptr);
+            break;
     }
 }
+
 } // namespace cfd::numerics::gradient

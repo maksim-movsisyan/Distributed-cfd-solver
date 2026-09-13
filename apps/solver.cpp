@@ -13,9 +13,9 @@
 #include "cfd/mesh/localmesh.hpp"
 #include "cfd/mesh/validate.hpp"
 #include "cfd/mpi/log.hpp"
-#include "cfd/solver/config.hpp"
-#include "cfd/solver/bc/config.hpp"
-#include "cfd/solver/solver.hpp"
+#include "cfd/solver/compressible/config.hpp"
+#include "cfd/solver/compressible/bc/config.hpp"
+#include "cfd/solver/compressible/solver.hpp"
 
 int main(int argc, char** argv) {
     // MPI initialization 
@@ -90,12 +90,12 @@ int main(int argc, char** argv) {
     cfd::mesh::validate_and_log_meshpart(mp);
 
     // Read solver config and boundary conditions file
-    const cfd::solver::SolverConfig cfg =
-        cfd::solver::parse_solver_config(solver_cfg_file, MPI_COMM_WORLD);
-    const cfd::solver::bc::BoundaryConfig bcfg =
-        cfd::solver::bc::parse_boundary_config(bc_cfg_file, mp, MPI_COMM_WORLD);
+    const cfd::solver::compressible::SolverConfig cfg =
+        cfd::solver::compressible::parse_solver_config(solver_cfg_file, MPI_COMM_WORLD);
+    const cfd::solver::compressible::bc::BoundaryConfig bcfg =
+        cfd::solver::compressible::bc::parse_boundary_config(bc_cfg_file, mp, MPI_COMM_WORLD);
 
-    const int status = cfd::solver::run_solver(cfg, bcfg, mp, MPI_COMM_WORLD);
+    const int status = cfd::solver::compressible::run_solver(cfg, bcfg, mp, MPI_COMM_WORLD);
         
     if (rank == 0)
         std::fprintf(stderr, "Total executional time = %.5f sec\n",

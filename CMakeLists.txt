@@ -131,14 +131,12 @@ add_library(
         src/mpi/log.cpp
         src/mpi/mpi_util.cpp
 )
-
 target_include_directories(
     cfd_mpi
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
 )
-
 target_link_libraries(
     cfd_mpi
     PUBLIC
@@ -163,7 +161,6 @@ add_library(
         src/linalg/bicgstab.cpp
         src/linalg/config.cpp
 )
-
 target_include_directories(
     cfd_linalg
     PUBLIC
@@ -175,7 +172,6 @@ target_include_directories(
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/external/tomlplusplus/include
 )
-
 target_link_libraries(
     cfd_linalg
     PUBLIC
@@ -200,14 +196,12 @@ add_library(
         src/mesh/aux_connectivity.cpp
         src/mesh/aux_geometry.cpp
 )
-
 target_include_directories(
     cfd_mesh
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
 )
-
 target_link_libraries(
     cfd_mesh
     PUBLIC
@@ -225,14 +219,12 @@ add_library(
     STATIC
         src/partition/partition.cpp
 )
-
 target_include_directories(
     cfd_partition
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
 )
-
 target_link_libraries(
     cfd_partition
     PUBLIC
@@ -253,14 +245,12 @@ add_library(
     STATIC
         src/io/cgns/cgns_reader.cpp
 )
-
 target_include_directories(
     cfd_cgns_io
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
 )
-
 target_link_libraries(
     cfd_cgns_io
     PUBLIC
@@ -282,20 +272,17 @@ add_library(
         src/io/vtk/vtu.cpp
         src/io/toml/toml_utilities.cpp
 )
-
 target_include_directories(
     cfd_solver_io
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
 )
-
 target_include_directories(
     cfd_solver_io
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/external/tomlplusplus/include
 )
-
 target_link_libraries(
     cfd_solver_io
     PUBLIC
@@ -308,33 +295,74 @@ target_link_libraries(
         cfd_project_warnings
 )
 
-    #===============
-    #=== SOLVER ====
-    #===============
+    #================
+    #=== NUMERICS ===
+    #================
 add_library(
-    cfd_solver
+    cfd_numerics
     STATIC
-        src/solver/bc/config.cpp
-        src/solver/config.cpp
-        src/fields/halo.cpp
-        src/solver/solver.cpp
         src/numerics/gradient/gradient_operator.cpp
         src/numerics/gradient/gradient_manager.cpp
 )
+target_include_directories(
+    cfd_numerics
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(
+    cfd_numerics
+    PUBLIC
+        cfd_project_options
+        cfd_mesh
+    PRIVATE
+        cfd_project_warnings
+)
 
+    #=============
+    #=== FILDS ===
+    #=============
+add_library(
+    cfd_fields
+    STATIC
+        src/fields/halo.cpp
+)
+target_include_directories(
+    cfd_fields
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(
+    cfd_fields
+    PUBLIC
+        cfd_project_options
+        cfd_mpi
+    PRIVATE
+        cfd_project_warnings
+)
+
+    #==============
+    #=== SOLVER ===
+    #==============
+add_library(
+    cfd_solver
+    STATIC
+        src/solver/compressible/bc/config.cpp
+        src/solver/compressible/config.cpp
+        src/solver/compressible/solver.cpp
+)
 target_include_directories(
     cfd_solver
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
 )
-
 target_include_directories(
     cfd_solver
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/external/tomlplusplus/include
 )
-
 target_link_libraries(
     cfd_solver
     PUBLIC
@@ -343,6 +371,8 @@ target_link_libraries(
         cfd_mesh
         cfd_solver_io
         cfd_linalg
+        cfd_numerics
+        cfd_fields
     PRIVATE
         cfd_project_warnings
 )
@@ -354,7 +384,6 @@ target_link_libraries(
     #=== MESH PARTITONING (PREPARE SOLVER INPUT) ===
     #===============================================
 add_executable(mesh_partition apps/mesh_partition.cpp)
-
 target_link_libraries(
     mesh_partition
     PRIVATE
@@ -373,7 +402,6 @@ target_link_libraries(
     #=== FLOW SOLVER =============
     #=============================
 add_executable(solver apps/solver.cpp)
-
 target_link_libraries(
     solver
     PRIVATE
@@ -392,7 +420,6 @@ target_link_libraries(
 if(BUILD_TESTING)
     #=== LINALG MODULE TESTS ===
     add_executable(cfd_linalg_test tests/linalg_test.cpp)
-
     target_link_libraries(
         cfd_linalg_test
         PRIVATE
@@ -405,7 +432,6 @@ if(BUILD_TESTING)
 
     #=== DKAMINPAR DISTRIBUTED API SMOKE TEST ===
     add_executable(cfd_kaminpar_api tests/kaminpar_api.cpp)
-
     target_link_libraries(
         cfd_kaminpar_api
         PRIVATE
@@ -415,7 +441,6 @@ if(BUILD_TESTING)
             cfd_project_options
             cfd_project_warnings
     )
-
     add_test(
         NAME kaminpar.api.2
         COMMAND
@@ -423,7 +448,6 @@ if(BUILD_TESTING)
             ${MPIEXEC_NUMPROC_FLAG} 2
             $<TARGET_FILE:cfd_kaminpar_api>
     )
-
     set_tests_properties(
         kaminpar.api.2
         PROPERTIES

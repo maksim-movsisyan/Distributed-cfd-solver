@@ -131,24 +131,28 @@ The main solver execution parameters are specified in a TOML file (e.g. `solver.
 #### 1. `[flow]` — Thermodynamic Model
 Defines the working fluid and equation of state.
 
-| Key | Type | Allowed Values | Description |
-|---|---|---|---|
-| `flow_model` | String | `"INVISCID_FLOW"`, `"VISCOUS_FLOW"` | Mean-flow set of equations (Euler/Navier-Stokes). |
-| `eos` | String | `"IDEAL_GAS"` | Equation of State model. |
-| `gamma` | Float | $> 0.0$ (e.g. `1.4`) | Specific heat ratio ($c_p / c_v$). |
-| `gas_constant` | Float | $> 0.0$ (e.g. `287.052874`) | Specific gas constant $R$ [$\text{J}/(\text{kg}\cdot\text{K})$]. |
-| `prandtl` | Float | $> 0.0$ (e.g. `0.71`) | Laminar Prandtl number. |
+| Key | Type | Allowed Values | Default | Description |
+|---|---|---|---|---|
+| `flow_model` | String | `"INVISCID_FLOW"`, `"VISCOUS_FLOW"` | *Required* | Mean-flow set of equations (Euler / Navier-Stokes). |
+| `eos` | String | `"IDEAL_GAS"` | *Required* | Equation of State model. |
+| `gamma` | Float | $> 0.0$ (e.g. `1.4`) | *Required* | Specific heat ratio ($c_p / c_v$). |
+| `gas_constant` | Float | $> 0.0$ (e.g. `287.052874`) | *Required* | Specific gas constant $R$ [$\text{J}/(\text{kg}\cdot\text{K})$]. |
+| `prandtl` | Float | $> 0.0$ (e.g. `0.71`) | *Required for `VISCOUS_FLOW`* | Laminar Prandtl number. Forbidden if `flow_model = "INVISCID_FLOW"`. |
+
+> **Validation Rules:**
+> * If `flow_model = "VISCOUS_FLOW"`, the `prandtl` key is strictly required.
+> * If `flow_model = "INVISCID_FLOW"`, specifying `prandtl` will trigger an unknown key error.
 
 ---
 
 #### 2. `[initial]` — Initial Field Conditions
 Sets the uniform initial flow field across all cells at $t = 0$.
 
-| Key | Type | Units / Format | Description |
-|---|---|---|---|
-| `rho` | Float | $\text{kg}/\text{m}^3$ ($> 0.0$) | Initial static density $\rho_0$. |
-| `pressure` | Float | $\text{Pa}$ ($> 0.0$) | Initial static pressure $p_0$. |
-| `velocity` | Array of 3 Floats | $\text{m}/\text{s}$ ($[u, v, w]$) | Initial Cartesian velocity vector $\mathbf{v}_0$. |
+| Key | Type | Allowed Values | Default | Description |
+|---|---|---|---|---|
+| `rho` | Float | $> 0.0$ [$\text{kg}/\text{m}^3$] | *Required* | Initial static density $\rho_0$. |
+| `pressure` | Float | $> 0.0$ [$\text{Pa}$] | *Required* | Initial static pressure $p_0$. |
+| `velocity` | Array of 3 Floats | 3 numbers [$\text{m}/\text{s}$] ($[u, v, w]$) | *Required* | Initial Cartesian velocity vector $\mathbf{v}_0$. |
 
 ---
 
@@ -159,52 +163,72 @@ Controls numerical flux computation, spatial reconstruction order, and slope lim
 |---|---|---|---|---|
 | `flux` | String | `"HLLC"` | *Required* | Riemann flux solver. |
 | `reconstruction` | String | `"FIRST_ORDER"`, `"MUSCL"`, `"MUSCL_DIRECTIONAL"` | *Required* | Spatial accuracy scheme. |
-| `limiter` | String | `"VENKAT"`, `"BARTH"`, `"VAN_ALBADA"` | `"VENKAT"` (Req. for `MUSCL`) | Slope limiter for gradient suppression near shocks/discontinuities. |
+| `limiter` | String | `"VENKAT"`, `"BARTH"`, `"VAN_ALBADA"` (for `MUSCL`),<br>`"MINMOD_1D"`, `"VAN_ALBADA_1D"` (for `MUSCL_DIRECTIONAL`) | *Required for `MUSCL`* | Slope limiter for gradient suppression near shocks/discontinuities. |
 | `venkat_k` | Float | $> 0.0$ | `0.5` | Threshold parameter $K$ for Venkatakrishnan limiter ($K \sim \Delta x^{3/2}$). |
-| `gradient` | String | `"GREEN_GAUSS_<FACE/CELL>"`, `"LEAST_SQUARES_<FACE/NODE>"` | `"GREEN_GAUSS_<FACE>"` | Gradient method |
+| `gradient` | String | `"GREEN_GAUSS_FACE"`, `"GREEN_GAUSS_CELL"`,<br>`"LEAST_SQUARES_FACE"`, `"LEAST_SQUARES_NODE"` | `"GREEN_GAUSS_FACE"` | Gradient evaluation method. |
 
-> **Validation Rule:** If `reconstruction = "MUSCL"`, the `limiter` key is strictly required.
+> **Validation Rules:**
+> * If `reconstruction = "FIRST_ORDER"`, the `limiter` key is ignored/not used.
+> * If `reconstruction = "MUSCL"`, `limiter` is strictly required (`"VENKAT"`, `"BARTH"`, `"VAN_ALBADA"`).
+> * If `reconstruction = "MUSCL_DIRECTIONAL"`, `limiter` is strictly required (`"MINMOD_1D"`, `"VAN_ALBADA_1D"`).
 
 ---
 
-#### 4. `[time]` — Temporal Integration & Convergence
+#### 4. `[turbulence]` — Turbulence Modeling (not done yet)
+Optional physics module for turbulent flow closure.
+
+| Key | Type | Allowed Values | Default | Description |
+|---|---|---|---|---|
+| `model` | String | `"SA"` | *Required* | Spalart-Allmaras 1-equation model. |
+| `nu_inf_ratio` | Float | $> 0.0$ | `3.0` | Freestream ratio $\tilde{\nu}_\infty / \nu_{mol}$. |
+| `max_distance_sweeps` | Integer | $\ge 1$ | `500` | Maximum sweeps for wall-distance calculation. |
+| `distance_tolerance` | Float | $> 0.0$ | `1.0e-8` | Relative tolerance for wall-distance calculation. |
+
+> **Validation Rule:** Enabling `[turbulence]` strictly requires `flow_model = "VISCOUS_FLOW"` in `[flow]`.
+
+---
+
+#### 5. `[time]` — Temporal Integration & Convergence
 Governs time-stepping schemes, CFL condition, and stopping criteria.
 
-| Key | Type | Allowed Values | Description |
-|---|---|---|---|
-| `mode` | String | `"Steady"`, `"DualTime"` | Time mode scheme (Steady/Unsteady). |
-| `scheme` | String | `"FORWARD_EULER"`, `"SSP_RK3"`, `"BACKWARD_EULER"` | Time integration scheme (1st-order Euler or 3-stage TVD Runge-Kutta, Implicit Euler). |
-| `cfl` | Float | $> 0.0$ (e.g. `0.5` – `1.2`) | Courant-Friedrichs-Lewy (CFL) number. |
-| `max_iterations` | Integer | $\ge 1$ | Maximum number of time iterations to execute. |
-| `residual_tolerance` | Float | $> 0.0$ (e.g. `1e-6`) | Relative $L_2$ residual tolerance for convergence termination. |
-| `time_step` | Float | $> 0.0$ (e.g. `1e-6`) | Requaired for unsteady - physical time step. |
-| `max_time_steps` | Integer | $> 0.0$ (e.g. `1`) | Requaired for unsteady - number of physical time steps. |
-| `bdf_order` | Integer | $> 0.0$ (e.g. `1/2`) | Requaired for unsteady - order for time derivatives. |
+| Key | Type | Allowed Values | Default | Description |
+|---|---|---|---|---|
+| `mode` | String | `"Steady"`, `"Unsteady"` | *Required* | Time mode scheme (Steady / Unsteady). |
+| `scheme` | String | `"FORWARD_EULER"`, `"BACKWARD_EULER"` | *Required* | Time integration scheme (Explicit or Implicit Euler). |
+| `cfl` | Float | $> 0.0$ (e.g. `0.5` – `25.0`) | *Required* | Courant-Friedrichs-Lewy (CFL) number. |
+| `max_iterations` | Integer | $\ge 1$ | *Required* | Maximum number of pseudo- or time iterations. |
+| `residual_tolerance` | Float | $> 0.0$ (e.g. `1e-6`) | *Required* | Relative $L_2$ residual tolerance for convergence termination. |
+| `time_step` | Float | $> 0.0$ [$\text{s}$] (e.g. `1e-6`) | *Required for `Unsteady`* | Physical time step size $\Delta t$. |
+| `max_time_steps` | Integer | $\ge 1$ | *Required for `Unsteady`* | Number of physical time steps. |
+| `bdf_order` | Integer | $1$, $2$ | `2` | Order of Backward Differentiation Formula for unsteady derivatives. |
+
+> **Validation Rule:** If `mode = "Unsteady"`, `time_step` and `max_time_steps` are strictly required.
 
 ---
 
-#### 5. `[output]` — Diagnostics & Solution Export
+#### 6. `[output]` — Diagnostics & Solution Export
 Configures disk export frequency and console residual logging.
 
-| Key | Type | Constraints | Description |
-|---|---|---|---|
-| `directory` | String | Valid path | Output directory for solution files and logs. |
-| `field_interval` | Integer | $\ge 0$ | Step interval for writing 3D VTU solution files (`0` disables intermediate writes). |
-| `residual_interval` | Integer | $\ge 1$ | Step interval for logging convergence diagnostics to console/log. |
+| Key | Type | Allowed Values | Default | Description |
+|---|---|---|---|---|
+| `directory` | String | Valid directory path | *Required* | Output directory for solution files and logs. |
+| `field_interval` | Integer | $\ge 0$ | *Required* | Step interval for writing 3D VTU solution files (`0` disables intermediate writes). |
+| `residual_interval` | Integer | $\ge 1$ | *Required* | Step interval for logging convergence diagnostics to console/log. |
 
 ---
 
-#### 6. `[linalg]` — Optional module for implicit schemes
-Configures linear algebra solver. This module is always optional, some values set as a default.
+#### 7. `[linalg]` — Linear Algebra Solver
+Configures linear algebra solver for implicit schemes (`BACKWARD_EULER`). This module is optional; default values are used if omitted.
 
-| Key | Type | Allowed Values | Description |
-|---|---|---|---|
-| `solver` | String | `"BICGSTAB"` | SLAE solver. |
-| `preconditioner` | String | `"None"`, `"SGS"` | Preconditioner for SLAE solver. |
-| `rel_tol` | Float | $\ge 0$ $\le 1$ (e.g. `1e-1`) | Relative tolerance. |
-| `abs_tol` | Float | $\ge 0$ (e.g. `1e-16`) | Absolute tolerance. |
-| `max_iter` | Integer | $\ge 0$ | Maximum number of iterations for SLAE solver. |
-| `verbosity` | String | `"Silent"`, `"Summary"`, `"Verbose"` | SLAE solver verbosity. |
+| Key | Type | Allowed Values | Default | Description |
+|---|---|---|---|---|
+| `solver` | String | `"BICGSTAB"` | `"BICGSTAB"` | SLAE solver. |
+| `preconditioner` | String | `"None"`, `"SGS"` | `"None"` | Preconditioner for SLAE solver (None or Symmetric Gauss-Seidel). |
+| `rel_tol` | Float | $> 0.0$ (e.g. `1e-1`) | `1e-1` | Relative tolerance for linear solver. |
+| `abs_tol` | Float | $> 0.0$ (e.g. `1e-30`) | `1e-30` | Absolute tolerance for linear solver. |
+| `max_iter` | Integer | $> 0$ | `100` | Maximum number of iterations for SLAE solver. |
+| `verbosity` | String | `"Silent"`, `"Summary"`, `"Verbose"` | `"Silent"` | SLAE solver verbosity. |
+| `res_verify` | Any | Allowed key | *None* | Optional flag/parameter for residual verification. |
 
 ---
 

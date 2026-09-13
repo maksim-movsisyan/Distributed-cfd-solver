@@ -1,11 +1,7 @@
-#include "cfd/solver/compressible/bc/config.hpp"
+#include "cfd/bc/config.hpp"
 
-#include <mpi.h>
-
-#include <array>
 #include <cstdlib>
 #include <initializer_list>
-#include <string>
 #include <string_view>
 #include <vector>
 
@@ -14,7 +10,7 @@
 
 using namespace cfd::io::toml_utils;
 
-namespace cfd::solver::compressible::bc {
+namespace cfd::bc {
 
 namespace {
 [[noreturn]] void fail(const MPI_Comm comm, const std::string& what) {
@@ -57,17 +53,17 @@ void parse_inflow_descriptor(const toml::table& t,
 
     // 2. Strict key whitelisting per detected mode
     if (has_vel) {
-        d.inflow_mode = bc::InflowMode::Velocity;
+        d.inflow_mode = physical::InflowMode::Velocity;
         check_allowed_keys(t, {"patch_id", "type", "name", "cgns_type", "global_face_count",
                                "p", "p_inf", "t", "t_inf", "velocity", "velocity_inf"},
                            ctx, comm);
     } else if (has_dir) {
-        d.inflow_mode = bc::InflowMode::MachDirection;
+        d.inflow_mode = physical::InflowMode::MachDirection;
         check_allowed_keys(t, {"patch_id", "type", "name", "cgns_type", "global_face_count",
                                "p", "p_inf", "t", "t_inf", "mach", "", "direction"},
                            ctx, comm);
     } else {
-        d.inflow_mode = bc::InflowMode::MachAngles;
+        d.inflow_mode = physical::InflowMode::MachAngles;
         check_allowed_keys(t, {"patch_id", "type", "name", "cgns_type", "global_face_count",
                                "p", "p_inf", "t", "t_inf", "mach",
                                "alpha", "alpha_deg", "beta", "beta_deg"},
@@ -96,13 +92,13 @@ void parse_inflow_descriptor(const toml::table& t,
 
     // 4. Mode-specific payload extraction
     switch (d.inflow_mode) {
-        case bc::InflowMode::Velocity: {
+        case physical::InflowMode::Velocity: {
             const std::string vkey = t.contains("velocity") ? "velocity" : "velocity_inf";
             d.velocity = req_vec3(t, vkey.c_str(), ctx, comm);
             break;
         }
 
-        case bc::InflowMode::MachDirection: {
+        case physical::InflowMode::MachDirection: {
             d.mach = req_number(t, "mach", ctx, comm);
             check_positive(d.mach, "mach", ctx, comm);
             d.direction = req_vec3(t, "direction", ctx, comm);
@@ -116,7 +112,7 @@ void parse_inflow_descriptor(const toml::table& t,
             break;
         }
 
-        case bc::InflowMode::MachAngles: {
+        case physical::InflowMode::MachAngles: {
             d.mach = req_number(t, "mach", ctx, comm);
             check_positive(d.mach, "mach", ctx, comm);
 
@@ -187,31 +183,31 @@ BoundaryConfig parse_boundary_config(const std::string& path,
         const std::string type = req_string(*t, "type", ctx, comm);
 
         if (type == "SUPERSONIC_INLET") {
-            d.type = bc::BCType::SupersonicInlet;
+            d.type = physical::BCType::SupersonicInlet;
             parse_inflow_descriptor(*t, d, ctx, comm);
 
         } else if (type == "FARFIELD") {
-            d.type = bc::BCType::Farfield;
+            d.type = physical::BCType::Farfield;
             parse_inflow_descriptor(*t, d, ctx, comm);
 
-            if (d.inflow_mode == bc::InflowMode::MachAngles || d.inflow_mode == bc::InflowMode::MachDirection) {
+            if (d.inflow_mode == physical::InflowMode::MachAngles || d.inflow_mode == physical::InflowMode::MachDirection) {
                 mpi::log_stat("WARNING: %s: Mach-based inflow mode selected. "
                                 "Note: velocity magnitude is evaluated assuming Ideal Gas EOS kinematics.",
                                 ctx.c_str());
             }
         } else if (type == "SUPERSONIC_OUTLET") {
-            d.type = bc::BCType::SupersonicOutlet;
+            d.type = physical::BCType::SupersonicOutlet;
             check_allowed_keys(*t, meta, ctx, comm);
 
         } else if (type == "SLIP_WALL") {
-            d.type = bc::BCType::SlipWall;
+            d.type = physical::BCType::SlipWall;
             check_allowed_keys(*t, meta, ctx, comm);
 
         } else if (type == "SYMMETRY") {
-            d.type = bc::BCType::Symmetry;
+            d.type = physical::BCType::Symmetry;
             check_allowed_keys(*t, meta, ctx, comm);
         } else if (type == "NO_SLIP_WALL") {
-            d.type = bc::BCType::NoSlipWall;
+            d.type = physical::BCType::NoSlipWall;
             check_allowed_keys(*t, {"patch_id", "type", "name", "cgns_type", "global_face_count",
                                     "t", "t_wall", "velocity"}, ctx, comm);
 
@@ -230,7 +226,7 @@ BoundaryConfig parse_boundary_config(const std::string& path,
                 d.velocity = {0.0, 0.0, 0.0}; // default stationary wall
             }
         } else if (type == "NO_SLIP_WALL_HEAT_FLUX" || type == "NO_SLIP_WALL_ADIABATIC") {
-            d.type = bc::BCType::NoSlipWallHeatFlux;
+            d.type = physical::BCType::NoSlipWallHeatFlux;
             check_allowed_keys(*t, {"patch_id", "type", "name", "cgns_type", "global_face_count",
                                     "tmp_grad", "heat_flux_grad", "velocity"},
                             ctx, comm);
@@ -249,20 +245,20 @@ BoundaryConfig parse_boundary_config(const std::string& path,
                 d.velocity = {0.0, 0.0, 0.0}; // default: stationary wall
             }
         } else if (type == "SUBSONIC_INLET") {
-            d.type = bc::BCType::SubsonicInlet;
+            d.type = physical::BCType::SubsonicInlet;
             if (!t->contains("p") && !t->contains("p_inf")) {
                 // fictious pressure for parse_inflow_descriptor
                 const_cast<toml::table*>(t)->insert_or_assign("p", constants::kIsaPressure);
             }
             parse_inflow_descriptor(*t, d, ctx, comm);
             
-            if (d.inflow_mode == bc::InflowMode::MachAngles || d.inflow_mode == bc::InflowMode::MachDirection) {
+            if (d.inflow_mode == physical::InflowMode::MachAngles || d.inflow_mode == physical::InflowMode::MachDirection) {
                 mpi::log_stat("WARNING: %s: Mach-based inflow mode selected. "
                                 "Note: velocity magnitude is evaluated assuming Ideal Gas EOS kinematics.",
                                 ctx.c_str());
             }
         } else if (type == "SUBSONIC_OUTLET") {
-            d.type = bc::BCType::SubsonicOutlet;
+            d.type = physical::BCType::SubsonicOutlet;
             check_allowed_keys(*t, {"patch_id", "type", "name", "cgns_type", "global_face_count",
                                     "p", "p_outlet", "p_back"}, ctx, comm);
 

@@ -1,13 +1,20 @@
 #pragma once 
 
-#include "cfd/solver/compressible/bc/bc.hpp"
+#include <array>
+#include <string>
+#include "cfd/mesh/localmesh.hpp"
 
-namespace cfd::solver::compressible::bc { 
+#include <mpi.h>
+
+#include "cfd/core/types.hpp"
+#include "cfd/bc/physical/physical_bc.hpp"
+
+namespace cfd::bc { 
 
 // One parsed [[boundary_condition]] table.
 struct BCDescriptor {
-    BCType type = BCType::Symmetry;
-    InflowMode inflow_mode{InflowMode::Velocity};
+    physical::BCType type = physical::BCType::Symmetry;
+    physical::InflowMode inflow_mode{physical::InflowMode::Velocity};
     int patch_id = -1;
 
     // pressure and temperature
@@ -38,4 +45,4 @@ BoundaryConfig parse_boundary_config(const std::string& path,
                                      const mesh::MeshPart& mp,
                                      MPI_Comm comm);
 
-} // namespace cfd::solver::compressible::bc
+} // namespace cfd::bc

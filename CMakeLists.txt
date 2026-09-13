@@ -342,13 +342,41 @@ target_link_libraries(
         cfd_project_warnings
 )
 
+    #===========================
+    #=== BOUNDARY CONDITIONS ===
+    #===========================
+add_library(
+    cfd_boundary_conditions
+    STATIC
+        src/bc/config.cpp
+)
+target_include_directories(
+    cfd_boundary_conditions
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+)
+target_include_directories(
+    cfd_boundary_conditions
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/external/tomlplusplus/include
+)
+target_link_libraries(
+    cfd_boundary_conditions
+    PUBLIC
+        cfd_project_options
+        cfd_mesh
+        cfd_numerics
+    PRIVATE
+        cfd_project_warnings
+)
+
     #==============
     #=== SOLVER ===
     #==============
 add_library(
     cfd_solver
     STATIC
-        src/solver/compressible/bc/config.cpp
         src/solver/compressible/config.cpp
         src/solver/compressible/solver.cpp
 )
@@ -371,6 +399,7 @@ target_link_libraries(
         cfd_mesh
         cfd_solver_io
         cfd_linalg
+        cfd_boundary_conditions
         cfd_numerics
         cfd_fields
     PRIVATE
@@ -411,6 +440,7 @@ target_link_libraries(
     cfd_mpi
     cfd_mesh
     cfd_solver_io
+    cfd_boundary_conditions
     cfd_solver
 )
 

@@ -33,10 +33,9 @@
 #include "cfd/fields/fields_manager.hpp"
 #include "cfd/numerics/gradient/gradient_manager.hpp"
 #include "cfd/numerics/reconstruction/concepts.hpp"
+#include "cfd/bc/config.hpp"
 
-
-#include "cfd/solver/compressible/bc/bc_manager.hpp"
-#include "cfd/solver/compressible/bc/config.hpp"
+#include "cfd/solver/compressible/bc_manager.hpp"
 #include "cfd/solver/compressible/config.hpp"
 #include "cfd/solver/compressible/eos/concepts.hpp"
 #include "cfd/solver/compressible/eos/state_conversions.hpp"
@@ -908,7 +907,7 @@ private:
     PhysPolicy phys_;
     ResidualKernel<EOS, FluxPolicy, ReconPolicy, PhysPolicy> residual_kernel_;
     JacobianKernel<EOS, FluxPolicy, PhysPolicy> jacobian_kernel_;
-    bc::BoundaryManager<EOS> bcs_;
+    BoundaryManager<EOS> bcs_;
     fields::halo::HaloExchanger halo_;
 
     TimePolicy time_{};

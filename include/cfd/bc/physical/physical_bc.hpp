@@ -1,13 +1,12 @@
 #pragma once
 
 #include "cfd/core/types.hpp"
-#include "cfd/solver/compressible/eos/concepts.hpp"
 #include "cfd/mesh/localmesh.hpp"
 
 #include <string>
 #include <span>
 
-namespace cfd::solver::compressible::bc {
+namespace cfd::bc::physical {
 
 enum class BCType {
     // Physical (coupled) BCs:
@@ -49,7 +48,6 @@ enum class InflowMode {
  * 
  * Ghost cells for patch faces start at index: c_ghost = n_cells + (face_idx - n_inner_faces).
  */
-template <eos::EquationOfStatePolicy EOS>
 class BoundaryCondition {
 public:
     /**
@@ -64,16 +62,15 @@ public:
 
     /**
      * @brief Patch apply subroutine
-     * @param[inout] q - MeanFlow variables span [p u v w T]
+     * @param[inout] q - MeanFlow variables span [p u v w (T)]
      */
     virtual void update_ghost_cells(std::span<double* const> q, 
-                                    const mesh::MeshPart& mesh,
-                                    const EOS& eos) const = 0;
+                                    const mesh::MeshPart& mesh) const = 0;
 
     /** 
      * @brief Patch apply gradients subroutine
      * @param[in] q - MeanFlow variables span [p u v w (T)]
-     * @param[inout] gxyz - MeanFlow variables gradients spans [grad_pxyz grad_uxyz grad_vxyz grad_wxyz grad_Txyz]
+     * @param[inout] gxyz - MeanFlow variables gradients spans [grad_pxyz grad_uxyz grad_vxyz grad_wxyz (grad_Txyz)]
      */
     virtual void update_ghost_cells_grad(std::span<const double* const> q, 
                                          std::span<double* const> gx, 
@@ -94,4 +91,4 @@ protected:
     LocalIndex m_end{0};
 };
 
-} //namespace cfd::solver::compressible::bc
+} //namespace cfd::bc::physical

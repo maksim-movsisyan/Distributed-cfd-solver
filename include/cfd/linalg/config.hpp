@@ -1,6 +1,7 @@
 #pragma once
 
 #include <mpi.h>
+#include <string>
 
 namespace cfd::linalg {
   

@@ -16,7 +16,7 @@
 #include "cfd/fields/fields_manager.hpp"
 #include "cfd/fields/halo.hpp"
 #include "cfd/numerics/gradient/gradient_manager.hpp"
-#include "cfd/solver/compressible/bc/config.hpp"
+#include "cfd/bc/config.hpp"
 #include "cfd/solver/compressible/eos/concepts.hpp"
 #include "cfd/solver/compressible/physics/physics_concepts.hpp"
 #include "cfd/solver/compressible/physics/inviscid_flow.hpp"

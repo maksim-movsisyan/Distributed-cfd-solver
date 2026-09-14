@@ -6,6 +6,8 @@
 #include "cfd/linalg/bsr_helpers.hpp"
 #include "cfd/linalg/bsr_matrix.hpp"
 #include "cfd/linalg/csr_matrix.hpp"
+#include "cfd/linalg/ldu_matrix.hpp"    
+#include "cfd/linalg/ldu_helpers.hpp"
 #include "cfd/linalg/types.hpp"
 
 namespace cfd::linalg {
@@ -27,6 +29,8 @@ void IdentityPreconditioner::apply(const Vector& r, Vector& z) const {
 void SgsPreconditioner::setup(const LinearOperator& op) {
     csr_ = dynamic_cast<const CsrMatrix*>(&op);
     bsr_ = dynamic_cast<const BsrMatrix*>(&op);
+    ldu_ = dynamic_cast<const LduMatrix*>(&op);
+    
     if (csr_ != nullptr) {
         mode_ = Mode::Csr;
         check(csr_->assembled(), op.layout().comm(), "SgsPreconditioner: matrix not assembled");
@@ -87,8 +91,33 @@ void SgsPreconditioner::setup(const LinearOperator& op) {
         inv_diag_.clear();
         return;
     }
+    if (ldu_ != nullptr) {
+        mode_ = Mode::Ldu;
+        check(ldu_->assembled(), op.layout().comm(), "SgsPreconditioner: matrix not assembled");
+        const LocalIndex n = ldu_->localRows();
+        const auto n_sz = static_cast<std::size_t>(n);
+
+        inv_diag_.resize(n_sz);
+        work_y_.resize(n_sz);
+
+        const auto& d = ldu_->diag();
+        for (LocalIndex i = 0; i < n; ++i) {
+            const double v = d[static_cast<std::size_t>(i)];
+            if (v == 0.0) {
+                std::ostringstream os;
+                os << "SgsPreconditioner: zero diagonal at row " << op.layout().localBegin() + i;
+                fatal(op.layout().comm(), os.str());
+            }
+            inv_diag_[static_cast<std::size_t>(i)] = 1.0 / v;
+        }
+
+        diag_lu_.clear();
+        diag_pivots_.clear();
+        return;
+    }
+    
     fatal(op.layout().comm(),
-          "SgsPreconditioner::setup: operator is neither CsrMatrix nor BsrMatrix");
+      "SgsPreconditioner::setup: operator is neither CsrMatrix, BsrMatrix, nor LduMatrix");
 }
 
 void SgsPreconditioner::apply(const Vector& r, Vector& z) const {
@@ -139,27 +168,67 @@ void SgsPreconditioner::apply(const Vector& r, Vector& z) const {
         }
         return;
     }
+    if (mode_ == Mode::Bsr) {
+        // BSR mode
+        check(r.blockSize() == bsr_->blockSize() && z.blockSize() == bsr_->blockSize(), comm,
+            "SgsPreconditioner::apply: vector block size mismatch");
+        check(r.layout().compatibleWith(bsr_->layout()) && z.layout().compatibleWith(bsr_->layout()),
+            comm, "SgsPreconditioner::apply: incompatible vectors");
 
-    // BSR mode
-    check(r.blockSize() == bsr_->blockSize() && z.blockSize() == bsr_->blockSize(), comm,
-          "SgsPreconditioner::apply: vector block size mismatch");
-    check(r.layout().compatibleWith(bsr_->layout()) && z.layout().compatibleWith(bsr_->layout()),
-          comm, "SgsPreconditioner::apply: incompatible vectors");
+        // Start from z = 0: fixed linear operator (see the CSR branch); extra
+        // sweeps chain on the result of the previous one.
+        z.setZero();
+        for (int sweep = 0; sweep < sweeps_; ++sweep) {
+            detail::bsr_sgs_sweep_dispatch(bsr_->localRows(), true, bsr_->blockSize(),
+                                        bsr_->rowPtr().data(), bsr_->cols().data(),
+                                        bsr_->values().data(), bsr_->diagIndex().data(),
+                                        diag_lu_.data(), diag_pivots_.data(), r.data(), z.data());
+            z.updateGhosts();
+            detail::bsr_sgs_sweep_dispatch(bsr_->localRows(), false, bsr_->blockSize(),
+                                        bsr_->rowPtr().data(), bsr_->cols().data(),
+                                        bsr_->values().data(), bsr_->diagIndex().data(),
+                                        diag_lu_.data(), diag_pivots_.data(), r.data(), z.data());
+            z.updateGhosts();
+        }
+        return;
+    }
+    if (mode_ == Mode::Ldu) {
+        check(r.blockSize() == 1 && z.blockSize() == 1, comm,
+              "SgsPreconditioner::apply: block size must be 1 for LduMatrix");
+        check(r.layout().compatibleWith(ldu_->layout()) && z.layout().compatibleWith(ldu_->layout()),
+              comm, "SgsPreconditioner::apply: incompatible vectors");
 
-    // Start from z = 0: fixed linear operator (see the CSR branch); extra
-    // sweeps chain on the result of the previous one.
-    z.setZero();
-    for (int sweep = 0; sweep < sweeps_; ++sweep) {
-        detail::bsr_sgs_sweep_dispatch(bsr_->localRows(), true, bsr_->blockSize(),
-                                       bsr_->rowPtr().data(), bsr_->cols().data(),
-                                       bsr_->values().data(), bsr_->diagIndex().data(),
-                                       diag_lu_.data(), diag_pivots_.data(), r.data(), z.data());
-        z.updateGhosts();
-        detail::bsr_sgs_sweep_dispatch(bsr_->localRows(), false, bsr_->blockSize(),
-                                       bsr_->rowPtr().data(), bsr_->cols().data(),
-                                       bsr_->values().data(), bsr_->diagIndex().data(),
-                                       diag_lu_.data(), diag_pivots_.data(), r.data(), z.data());
-        z.updateGhosts();
+        const LocalIndex n = ldu_->localRows();
+        const std::size_t n_int = ldu_->numInternalEdges();
+        const std::size_t n_total = ldu_->numTotalEdges();
+
+        const LocalIndex* CFD_RESTRICT owner_start = ldu_->ownerStart().data();
+        const LocalIndex* CFD_RESTRICT owner       = ldu_->owner().data();
+        const LocalIndex* CFD_RESTRICT neigh       = ldu_->neigh().data();
+        const double* CFD_RESTRICT idg             = inv_diag_.data();
+        const double* CFD_RESTRICT up              = ldu_->upperData();
+        const double* CFD_RESTRICT lo              = ldu_->lowerData();
+
+        const double* CFD_RESTRICT rv = r.data();
+        double* CFD_RESTRICT zv       = z.data();
+        double* CFD_RESTRICT yv       = work_y_.data();
+
+        z.setZero();
+
+        for (int sweep = 0; sweep < sweeps_; ++sweep) {
+            const bool first = (sweep == 0);
+
+            // 1. Forward pass (D + L)
+            detail::ldu_sgs_forward(n, n_int, n_total, owner_start, owner, neigh,
+                                    idg, up, lo, rv, zv, yv, first);
+            z.updateGhosts();
+
+            // 2. Backward pass (D + U)
+            detail::ldu_sgs_backward(n, n_int, n_total, owner_start, owner, neigh,
+                                     idg, up, lo, rv, zv, yv);
+            z.updateGhosts();
+        }
+        return;
     }
 }
 

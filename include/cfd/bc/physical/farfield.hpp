@@ -31,7 +31,7 @@ struct FarfieldParams {
     double R{287.052874};       ///< Specific gas constant [J / (kg K)]
 };
 
-namespace {
+namespace kernels {
 
 /** 
  * @brief Helper evaluating boundary face state from 1D Riemann Invariants.
@@ -227,7 +227,7 @@ inline void farfield_grad_kernel(std::span<const double* const> q,
         });
 }
 
-} // anonymous namespace
+} // namespace kernels
 
 /**
  * @class FarfieldBC
@@ -247,9 +247,9 @@ public:
         assert(q.size() >= 4 && "FarfieldBC requires at least 4 variables [p, u, v, w]");
 
         if (q.size() >= 5) {
-            farfield_kernel<5>(q, mesh, this->m_begin, this->m_end, m_p);
+            kernels::farfield_kernel<5>(q, mesh, this->m_begin, this->m_end, m_p);
         } else {
-            farfield_kernel<4>(q, mesh, this->m_begin, this->m_end, m_p);
+            kernels::farfield_kernel<4>(q, mesh, this->m_begin, this->m_end, m_p);
         }
     }
 
@@ -262,9 +262,9 @@ public:
         assert(q.size() == gx.size() && gx.size() == gy.size() && gy.size() == gz.size());
 
         if (q.size() >= 5) {
-            farfield_grad_kernel<5>(q, gx, gy, gz, mesh, this->m_begin, this->m_end, m_p);
+            kernels::farfield_grad_kernel<5>(q, gx, gy, gz, mesh, this->m_begin, this->m_end, m_p);
         } else {
-            farfield_grad_kernel<4>(q, gx, gy, gz, mesh, this->m_begin, this->m_end, m_p);
+            kernels::farfield_grad_kernel<4>(q, gx, gy, gz, mesh, this->m_begin, this->m_end, m_p);
         }
     }
 

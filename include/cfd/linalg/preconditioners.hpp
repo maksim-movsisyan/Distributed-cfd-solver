@@ -6,6 +6,7 @@ namespace cfd::linalg {
 
 class CsrMatrix;
 class BsrMatrix;
+class LduMatrix;
 
 /**
  * @class IdentityPreconditioner
@@ -41,21 +42,21 @@ public:
     void setup(const LinearOperator& op) override;
     void apply(const Vector& r, Vector& z) const override;
 
-    /// Extra forward+backward passes per apply (default 1; each costs two
-    /// halo rounds and typically buys little).
     void setSweeps(int sweeps) { sweeps_ = sweeps; }
 
 private:
-    enum class Mode { None, Csr, Bsr };
+    enum class Mode { None, Csr, Bsr, Ldu };  
 
     Mode mode_ = Mode::None;
     const CsrMatrix* csr_ = nullptr;
     const BsrMatrix* bsr_ = nullptr;
+    const LduMatrix* ldu_ = nullptr;         
     int sweeps_ = 1;
 
-    std::vector<double> inv_diag_;             // CSR: 1 / a_ii
-    std::vector<double> diag_lu_;              // BSR: factored diagonal blocks
-    std::vector<LocalIndex> diag_pivots_;      // BSR: pivots per block row
+    std::vector<double> inv_diag_;            // CSR & LDU: 1 / a_ii
+    std::vector<double> diag_lu_;             // BSR: factored diagonal blocks
+    std::vector<LocalIndex> diag_pivots_;     // BSR: pivots per block row
+    mutable std::vector<double> work_y_;      // Temp buffer for LDU
 };
 
 }  // namespace cfd::linalg

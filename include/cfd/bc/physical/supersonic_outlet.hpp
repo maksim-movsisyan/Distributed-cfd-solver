@@ -15,7 +15,7 @@
 
 namespace cfd::bc::physical {
 
-namespace {
+namespace kernels {
 
 /** 
  * @brief Fills ghost cells with state values for Supersonic Outlet (full zero-order Neumann extrapolation).
@@ -78,7 +78,7 @@ inline void supersonic_outlet_grad_kernel(std::span<double* const> gx,
         });
 }
 
-} // anonymous namespace
+} // namespace kernels
 
 /**
  * @class SupersonicOutletBC
@@ -95,9 +95,9 @@ public:
         assert(q.size() >= 4 && "SupersonicOutletBC requires at least 4 variables [p, u, v, w]");
 
         if (q.size() >= 5) {
-            supersonic_outlet_kernel<5>(q, mesh, this->m_begin, this->m_end);
+            kernels::supersonic_outlet_kernel<5>(q, mesh, this->m_begin, this->m_end);
         } else {
-            supersonic_outlet_kernel<4>(q, mesh, this->m_begin, this->m_end);
+            kernels::supersonic_outlet_kernel<4>(q, mesh, this->m_begin, this->m_end);
         }
     }
 
@@ -110,9 +110,9 @@ public:
         assert(gx.size() == gy.size() && gy.size() == gz.size());
 
         if (gx.size() >= 5) {
-            supersonic_outlet_grad_kernel<5>(gx, gy, gz, mesh, this->m_begin, this->m_end);
+            kernels::supersonic_outlet_grad_kernel<5>(gx, gy, gz, mesh, this->m_begin, this->m_end);
         } else {
-            supersonic_outlet_grad_kernel<4>(gx, gy, gz, mesh, this->m_begin, this->m_end);
+            kernels::supersonic_outlet_grad_kernel<4>(gx, gy, gz, mesh, this->m_begin, this->m_end);
         }
     }
 

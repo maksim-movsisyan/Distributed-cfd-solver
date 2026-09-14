@@ -15,7 +15,7 @@
 
 namespace cfd::bc::physical {
 
-namespace {
+namespace kernels {
 
 /** 
  * @brief Fills ghost cells with state values for Symmetry plane boundary.
@@ -104,7 +104,7 @@ inline void symmetry_grad_kernel(std::span<const double* const> q,
         });
 }
 
-} // anonymous namespace
+} // namespace kernels
 
 /**
  * @class SymmetryBC
@@ -121,9 +121,9 @@ public:
         assert(q.size() >= 4 && "SymmetryBC requires at least 4 variables [p, u, v, w]");
 
         if (q.size() >= 5) {
-            symmetry_kernel<5>(q, mesh, this->m_begin, this->m_end);
+            kernels::symmetry_kernel<5>(q, mesh, this->m_begin, this->m_end);
         } else {
-            symmetry_kernel<4>(q, mesh, this->m_begin, this->m_end);
+            kernels::symmetry_kernel<4>(q, mesh, this->m_begin, this->m_end);
         }
     }
 
@@ -136,9 +136,9 @@ public:
         assert(q.size() == gx.size() && gx.size() == gy.size() && gy.size() == gz.size());
 
         if (q.size() >= 5) {
-            symmetry_grad_kernel<5>(q, gx, gy, gz, mesh, this->m_begin, this->m_end);
+            kernels::symmetry_grad_kernel<5>(q, gx, gy, gz, mesh, this->m_begin, this->m_end);
         } else {
-            symmetry_grad_kernel<4>(q, gx, gy, gz, mesh, this->m_begin, this->m_end);
+            kernels::symmetry_grad_kernel<4>(q, gx, gy, gz, mesh, this->m_begin, this->m_end);
         }
     }
 

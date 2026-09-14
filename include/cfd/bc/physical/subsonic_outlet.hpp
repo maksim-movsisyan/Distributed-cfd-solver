@@ -23,7 +23,7 @@ struct SubsonicOutletParams {
     double prs_outlet{101325.0}; ///< Target static backpressure p_back [Pa]
 };
 
-namespace {
+namespace kernels {
 
 /** 
  * @brief Fills ghost cells with state values for Subsonic Outlet.
@@ -128,9 +128,9 @@ public:
         assert(q.size() >= 4 && "SubsonicOutletBC requires at least 4 variables [p, u, v, w]");
 
         if (q.size() >= 5) {
-            subsonic_outlet_kernel<5>(q, mesh, this->m_begin, this->m_end, m_p);
+            kernels::subsonic_outlet_kernel<5>(q, mesh, this->m_begin, this->m_end, m_p);
         } else {
-            subsonic_outlet_kernel<4>(q, mesh, this->m_begin, this->m_end, m_p);
+            kernels::subsonic_outlet_kernel<4>(q, mesh, this->m_begin, this->m_end, m_p);
         }
     }
 
@@ -143,9 +143,9 @@ public:
         assert(q.size() == gx.size() && gx.size() == gy.size() && gy.size() == gz.size());
 
         if (q.size() >= 5) {
-            subsonic_outlet_grad_kernel<5>(q, gx, gy, gz, mesh, this->m_begin, this->m_end, m_p);
+            kernels::subsonic_outlet_grad_kernel<5>(q, gx, gy, gz, mesh, this->m_begin, this->m_end, m_p);
         } else {
-            subsonic_outlet_grad_kernel<4>(q, gx, gy, gz, mesh, this->m_begin, this->m_end, m_p);
+            kernels::subsonic_outlet_grad_kernel<4>(q, gx, gy, gz, mesh, this->m_begin, this->m_end, m_p);
         }
     }
 

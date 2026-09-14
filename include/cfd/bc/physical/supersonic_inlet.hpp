@@ -28,7 +28,7 @@ struct SupersonicInletParams {
     double tmp_inlet{288.15};    ///< Static temperature [K]
 };
 
-namespace {
+namespace kernels {
 
 /** 
  * @brief Fills ghost cells with state values for Supersonic Inlet.
@@ -129,9 +129,9 @@ public:
         assert(q.size() >= 4 && "SupersonicInletBC requires at least 4 variables [p, u, v, w]");
 
         if (q.size() >= 5) {
-            supersonic_inlet_kernel<5>(q, mesh, this->m_begin, this->m_end, m_p);
+            kernels::supersonic_inlet_kernel<5>(q, mesh, this->m_begin, this->m_end, m_p);
         } else {
-            supersonic_inlet_kernel<4>(q, mesh, this->m_begin, this->m_end, m_p);
+            kernels::supersonic_inlet_kernel<4>(q, mesh, this->m_begin, this->m_end, m_p);
         }
     }
 
@@ -144,9 +144,9 @@ public:
         assert(q.size() == gx.size() && gx.size() == gy.size() && gy.size() == gz.size());
 
         if (q.size() >= 5) {
-            supersonic_inlet_grad_kernel<5>(q, gx, gy, gz, mesh, this->m_begin, this->m_end, m_p);
+            kernels::supersonic_inlet_grad_kernel<5>(q, gx, gy, gz, mesh, this->m_begin, this->m_end, m_p);
         } else {
-            supersonic_inlet_grad_kernel<4>(q, gx, gy, gz, mesh, this->m_begin, this->m_end, m_p);
+            kernels::supersonic_inlet_grad_kernel<4>(q, gx, gy, gz, mesh, this->m_begin, this->m_end, m_p);
         }
     }
 

@@ -45,7 +45,7 @@ struct NoSlipWallHeatFluxParams {
     }
 };
 
-namespace {
+namespace kernels {
 
 /** 
  * @brief Fills ghost cells with state values for No-Slip Wall with specified heat flux.
@@ -159,7 +159,7 @@ inline void no_slip_wall_heat_flux_grad_kernel(std::span<const double* const> q,
         });
 }
 
-} // anonymous namespace
+} // namespace kernels
 
 /**
  * @class NoSlipWallHeatFluxBC
@@ -179,9 +179,9 @@ public:
         assert(q.size() >= 4 && "NoSlipWallHeatFluxBC requires at least 4 variables [p, u, v, w]");
 
         if (q.size() >= 5) {
-            no_slip_wall_heat_flux_kernel<5>(q, mesh, this->m_begin, this->m_end, m_p);
+            kernels::no_slip_wall_heat_flux_kernel<5>(q, mesh, this->m_begin, this->m_end, m_p);
         } else {
-            no_slip_wall_heat_flux_kernel<4>(q, mesh, this->m_begin, this->m_end, m_p);
+            kernels::no_slip_wall_heat_flux_kernel<4>(q, mesh, this->m_begin, this->m_end, m_p);
         }
     }
 
@@ -194,9 +194,9 @@ public:
         assert(q.size() == gx.size() && gx.size() == gy.size() && gy.size() == gz.size());
 
         if (q.size() >= 5) {
-            no_slip_wall_heat_flux_grad_kernel<5>(q, gx, gy, gz, mesh, this->m_begin, this->m_end, m_p);
+            kernels::no_slip_wall_heat_flux_grad_kernel<5>(q, gx, gy, gz, mesh, this->m_begin, this->m_end, m_p);
         } else {
-            no_slip_wall_heat_flux_grad_kernel<4>(q, gx, gy, gz, mesh, this->m_begin, this->m_end, m_p);
+            kernels::no_slip_wall_heat_flux_grad_kernel<4>(q, gx, gy, gz, mesh, this->m_begin, this->m_end, m_p);
         }
     }
 

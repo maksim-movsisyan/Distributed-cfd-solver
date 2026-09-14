@@ -27,7 +27,7 @@ struct SubsonicInletParams {
     double tmp_inlet{288.15}; ///< Prescribed static temperature [K]
 };
 
-namespace {
+namespace kernels {
 
 /** 
  * @brief Fills ghost cells with state values for Subsonic Inlet.
@@ -121,7 +121,7 @@ inline void subsonic_inlet_grad_kernel(std::span<const double* const> q,
         });
 }
 
-} // anonymous namespace
+} // namespace kernels
 
 /**
  * @class SubsonicInletBC
@@ -141,9 +141,9 @@ public:
         assert(q.size() >= 4 && "SubsonicInletBC requires at least 4 variables [p, u, v, w]");
 
         if (q.size() >= 5) {
-            subsonic_inlet_kernel<5>(q, mesh, this->m_begin, this->m_end, m_p);
+            kernels::subsonic_inlet_kernel<5>(q, mesh, this->m_begin, this->m_end, m_p);
         } else {
-            subsonic_inlet_kernel<4>(q, mesh, this->m_begin, this->m_end, m_p);
+            kernels::subsonic_inlet_kernel<4>(q, mesh, this->m_begin, this->m_end, m_p);
         }
     }
 
@@ -156,9 +156,9 @@ public:
         assert(q.size() == gx.size() && gx.size() == gy.size() && gy.size() == gz.size());
 
         if (q.size() >= 5) {
-            subsonic_inlet_grad_kernel<5>(q, gx, gy, gz, mesh, this->m_begin, this->m_end, m_p);
+            kernels::subsonic_inlet_grad_kernel<5>(q, gx, gy, gz, mesh, this->m_begin, this->m_end, m_p);
         } else {
-            subsonic_inlet_grad_kernel<4>(q, gx, gy, gz, mesh, this->m_begin, this->m_end, m_p);
+            kernels::subsonic_inlet_grad_kernel<4>(q, gx, gy, gz, mesh, this->m_begin, this->m_end, m_p);
         }
     }
 

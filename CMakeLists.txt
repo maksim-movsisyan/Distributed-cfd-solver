@@ -160,6 +160,7 @@ add_library(
         src/linalg/preconditioners.cpp
         src/linalg/bicgstab.cpp
         src/linalg/config.cpp
+        src/linalg/ldu_matrix.cpp
 )
 target_include_directories(
     cfd_linalg

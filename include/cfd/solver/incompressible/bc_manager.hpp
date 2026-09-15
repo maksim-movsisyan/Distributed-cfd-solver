@@ -15,11 +15,11 @@
 #include "cfd/core/types.hpp"
 #include "cfd/mesh/localmesh.hpp"
 #include "cfd/mpi/log.hpp"
-#include "cfd/solver/incompressible/physical_bc/incompressible_bc.hpp"
-#include "cfd/solver/incompressible/physical_bc/velocity_inlet.hpp"
-#include "cfd/solver/incompressible/physical_bc/pressure_outlet.hpp"
-#include "cfd/solver/incompressible/physical_bc/symmetry.hpp"
-#include "cfd/solver/incompressible/physical_bc/noslip_wall.hpp"
+#include "cfd/bc/physical/physical_bc.hpp"
+#include "cfd/bc/physical/subsonic_inlet.hpp"
+#include "cfd/bc/physical/subsonic_outlet.hpp"
+#include "cfd/bc/physical/symmetry.hpp"
+#include "cfd/bc/physical/noslip_wall.hpp"
 #include "cfd/bc/config.hpp"
 
 namespace cfd::solver::incompressible {
@@ -30,7 +30,7 @@ namespace cfd::solver::incompressible {
  */
 class BoundaryManager {
 public:
-    using BCPtr = std::unique_ptr<physical_bc::IncompressibleBC>;
+    using BCPtr = std::unique_ptr<bc::physical::BoundaryCondition>;
     using BCBuilder = std::function<BCPtr(const std::string& zone_label,
                                           const LocalIndex beg,
                                           const LocalIndex end,
@@ -153,7 +153,7 @@ private:
         m_registry[bc::physical::BCType::Symmetry] =
             [](const std::string& z, const LocalIndex b, const LocalIndex e,
                const bc::BCDescriptor& /*desc*/) -> BCPtr {
-                return std::make_unique<physical_bc::SymmetryBC>(z, b, e);
+                return std::make_unique<bc::physical::SymmetryBC>(z, b, e);
             };
 
         // ==== No-slip Wall (Isothermal) ====
@@ -166,7 +166,7 @@ private:
                     .vz_wall  = desc.velocity[2],
                     .tmp_wall = desc.t
                 };
-                return std::make_unique<physical_bc::NoSlipWallBC>(z, b, e, par);
+                return std::make_unique<bc::physical::NoSlipWallBC>(z, b, e, par);
             };
 
         // ==== Subsonic Inlet ====
@@ -180,7 +180,7 @@ private:
                     .vz_inlet  = desc.velocity[2],
                     .tmp_inlet = desc.t
                 };
-                return std::make_unique<physical_bc::VelocityInletBC>(z, b, e, par);
+                return std::make_unique<bc::physical::SubsonicInletBC>(z, b, e, par);
             };
 
         // ==== Subsonic Outlet ====
@@ -190,14 +190,14 @@ private:
                 const bc::physical::SubsonicOutletParams par{
                     .prs_outlet = desc.p
                 };
-                return std::make_unique<physical_bc::PressureOutletBC>(z, b, e, par);
+                return std::make_unique<bc::physical::SubsonicOutletBC>(z, b, e, par);
             };
 
         // ==== Slip wall ====
         m_registry[bc::physical::BCType::SlipWall] =
             [](const std::string& z, const LocalIndex b, const LocalIndex e,
             const bc::BCDescriptor& /*desc*/) -> BCPtr {
-                return std::make_unique<physical_bc::SymmetryBC>(z, b, e);
+                return std::make_unique<bc::physical::SymmetryBC>(z, b, e);
             };
     }
 

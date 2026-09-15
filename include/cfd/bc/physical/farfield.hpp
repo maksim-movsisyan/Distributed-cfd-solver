@@ -268,6 +268,22 @@ public:
         }
     }
 
+    void apply_momentum_bc(std::span<double*> diag_u,
+                           std::span<double*> rhs,
+                           const mesh::MeshPart& mesh) const override {
+        static_cast<void>(mesh);
+        static_cast<void>(rhs);
+        static_cast<void>(diag_u);
+    }
+
+    void apply_pressure_bc(std::span<double*> diag_p,
+                           std::span<double*> rhs_p,
+                           const mesh::MeshPart& mesh) const override {
+        static_cast<void>(mesh);
+        static_cast<void>(rhs_p);
+        static_cast<void>(diag_p);
+    }
+
     [[nodiscard]] BCType kind() const noexcept override { return BCType::Farfield; }
 
 private:

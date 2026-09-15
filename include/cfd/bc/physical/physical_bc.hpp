@@ -60,6 +60,10 @@ public:
         : m_zone(std::move(zone)), m_begin(fbeg), m_end(fend) {}
     virtual ~BoundaryCondition() = default;
 
+    // =========================
+    // ==== GENERAL METHODS ====
+    // =========================
+    
     /**
      * @brief Patch apply subroutine
      * @param[inout] q - MeanFlow variables span [p u v w (T)]
@@ -77,6 +81,31 @@ public:
                                          std::span<double* const> gy, 
                                          std::span<double* const> gz, 
                                          const mesh::MeshPart& mesh) const = 0;
+    
+    // ================================
+    // ==== INCOMPRESSIBLE METHODS ====
+    // ================================
+
+    /**
+     * @brief Contributes boundary conditions to the momentum SLAE (velocity discretization).
+     * @param[in,out] diag_u Diagonal coefficient a_P of the owner cell (for implicit scheme).
+     * @param[in,out] rhs Right-hand side vector of the momentum equations [rhs_u, rhs_v, rhs_w].
+     * @param[in] mesh Local mesh.
+     */
+    virtual void apply_momentum_bc(std::span<double*> diag_u,
+                                   std::span<double*> rhs,
+                                   const mesh::MeshPart& mesh) const = 0;
+
+     /**
+     * @brief Contributes boundary conditions to the Poisson equation for pressure correction p'.
+     * @param[in,out] diag_p Diagonal coefficient of the Poisson matrix.
+     * @param[in,out] rhs_p Mass balance residual vector at faces (Poisson right-hand side).
+     * @param[in] mesh Local mesh.
+     */
+    virtual void apply_pressure_bc(std::span<double*> diag_p,
+                                   std::span<double*> rhs_p,
+                                   const mesh::MeshPart& mesh) const = 0;
+
 
     [[nodiscard]] virtual BCType kind() const noexcept = 0;
     

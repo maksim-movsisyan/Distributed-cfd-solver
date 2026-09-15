@@ -51,7 +51,7 @@ public:
     /**
      * @brief Computes spatial residuals and spectral radius for the entire local mesh.
      * 
-     * @param[in]  q       Span of NVars pointers to cell primitive variables (SoA).
+     * @param[in]  q        Span of NVars pointers to cell primitive variables (SoA).
      * @param[in]  grad_x   Span of NVars pointers to d/dx gradient components.
      * @param[in]  grad_y   Span of NVars pointers to d/dy gradient components.
      * @param[in]  grad_z   Span of NVars pointers to d/dz gradient components.

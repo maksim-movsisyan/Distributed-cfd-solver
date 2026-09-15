@@ -25,11 +25,11 @@ struct ReconBatchField {
     constexpr ReconBatchField() noexcept = default;
 
     constexpr ReconBatchField(
-        const double* const* q_in,
-        const double* const* gx_in = nullptr,
-        const double* const* gy_in = nullptr,
-        const double* const* gz_in = nullptr,
-        const double* const* phi_in = nullptr) noexcept {
+        const double* CFD_RESTRICT const* q_in,
+        const double* CFD_RESTRICT const* gx_in = nullptr,
+        const double* CFD_RESTRICT const* gy_in = nullptr,
+        const double* CFD_RESTRICT const* gz_in = nullptr,
+        const double* CFD_RESTRICT const* phi_in = nullptr) noexcept {
 
             for (std::size_t v = 0; v < NVars; ++v) {
             if (q_in)   q[v] = q_in[v];

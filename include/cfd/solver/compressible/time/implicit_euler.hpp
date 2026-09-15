@@ -1,19 +1,3 @@
-// Backward Euler (first-order implicit) time integration policy.
-//
-//   (V_i/dt_i + dR/dU) du = -R(u^n),    u^{n+1} = u^n + du
-//
-// The linear system is assembled natively from the mesh (structure built once
-// by implicit::MeanFlowSystem) and solved by distributed BiCGSTAB with a
-// hybrid SGS preconditioner. The matrix contains the MEAN FLOW only; physics
-// modules (turbulence transport) are frozen during the implicit step in this
-// first version — their slots are copied unchanged (see the notice below).
-//
-// STATUS (work in progress): the assembly pipeline is in place and its
-// interior Jacobian is finite-difference-verified against the residual; the
-// linear solve on strongly anisotropic supersonic cases does not yet reach
-// the configured tolerance within a practical iteration budget — see the
-// notes in implicit_system.hpp (diagonal-dominance modification) before
-// production use.
 #pragma once
 
 #include <sys/types.h>
@@ -21,7 +5,7 @@
 
 #include "cfd/core/types.hpp"
 #include "cfd/mpi/log.hpp"
-#include "cfd/solver/implicit_system.hpp"
+#include "cfd/solver/bsr_linear_system.hpp"
 #include "cfd/mesh/aux_connectivity.hpp"
 #include "cfd/mesh/aux_geometry.hpp"
 #include "cfd/linalg/config.hpp"
@@ -44,7 +28,7 @@ public:
     static constexpr const char* name() noexcept { return "BACKWARD_EULER"; }
 
     void system_setup(const mesh::MeshPart& mesh, const mesh::MeshAuxConnectivity& aux_conn, const linalg::SolverParams& solver_params, MPI_Comm comm) {
-        system_ = std::make_unique<BlockLinearSystem<5>>(mesh, aux_conn, solver_params, comm);
+        system_ = std::make_unique<BSRLinearSystem<5>>(mesh, aux_conn, solver_params, comm);
     }
 
     void advance(Op& op) noexcept {
@@ -92,7 +76,7 @@ public:
     }
 
 private:
-    std::unique_ptr<BlockLinearSystem<5>> system_;
+    std::unique_ptr<BSRLinearSystem<5>> system_;
 
     void set_rhs_and_zero_du(std::span<double* const> res_slots) {
         double* CFD_RESTRICT b = system_->rhs_data();

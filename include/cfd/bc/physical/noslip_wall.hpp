@@ -162,12 +162,42 @@ public:
         }
     }
 
-    void apply_momentum_bc(std::span<double*> diag_u,
-                           std::span<double*> rhs,
-                           const mesh::MeshPart& mesh) const override {
-        static_cast<void>(mesh);
-        static_cast<void>(rhs);
-        static_cast<void>(diag_u);
+    void apply_momentum_bc(const mesh::MeshPart& mesh,
+                           const mesh::MeshAuxGeometry& aux_geom,
+                           double* CFD_RESTRICT diag,
+                           double* CFD_RESTRICT rhs_u,
+                           double* CFD_RESTRICT rhs_v,
+                           double* CFD_RESTRICT rhs_w,
+                           double* CFD_RESTRICT m_dot,
+                           const double rho,
+                           const double mu,
+                           const double* CFD_RESTRICT mut = nullptr) const override {
+        static_cast<void>(rho);
+
+        const double uw = m_p.vx_wall;
+        const double vw = m_p.vy_wall;
+        const double ww = m_p.vz_wall;
+
+        const double* CFD_RESTRICT dist_inv = aux_geom.face_cell_dist_inv.data();
+
+        for (LocalIndex face_idx = m_begin; face_idx < m_end; ++face_idx) {
+            const auto f = static_cast<std::size_t>(face_idx);
+            const auto owner = static_cast<std::size_t>(mesh.face_owner[f]);
+
+            if (m_dot != nullptr) {
+                m_dot[f] = 0.0;
+            }
+
+            const double mu_eff = mu + (mut ? mut[owner] : 0.0);
+            const double area   = mesh.face_area[f];
+            const double D_b    = mu_eff * area * dist_inv[f];
+
+            diag[owner] += D_b;
+
+            if (uw != 0.0) rhs_u[owner] += D_b * uw;
+            if (vw != 0.0) rhs_v[owner] += D_b * vw;
+            if (ww != 0.0) rhs_w[owner] += D_b * ww;
+        }
     }
 
     void apply_pressure_bc(std::span<double*> diag_p,

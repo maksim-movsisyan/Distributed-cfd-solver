@@ -162,12 +162,48 @@ public:
         }
     }
 
-    void apply_momentum_bc(std::span<double*> diag_u,
-                           std::span<double*> rhs,
-                           const mesh::MeshPart& mesh) const override {
-        static_cast<void>(mesh);
-        static_cast<void>(rhs);
-        static_cast<void>(diag_u);
+    void apply_momentum_bc(const mesh::MeshPart& mesh,
+                           const mesh::MeshAuxGeometry& aux_geom,
+                           double* CFD_RESTRICT diag,
+                           double* CFD_RESTRICT rhs_u,
+                           double* CFD_RESTRICT rhs_v,
+                           double* CFD_RESTRICT rhs_w,
+                           double* CFD_RESTRICT m_dot,
+                           const double rho,
+                           const double mu,
+                           const double* CFD_RESTRICT mut = nullptr) const override {
+        const double u_in = m_p.vx_inlet;
+        const double v_in = m_p.vy_inlet;
+        const double w_in = m_p.vz_inlet;
+
+        const double* CFD_RESTRICT dist_inv = aux_geom.face_cell_dist_inv.data();
+
+        for (LocalIndex face_idx = m_begin; face_idx < m_end; ++face_idx ) {
+            const auto f = static_cast<std::size_t>(face_idx);
+            const auto owner = static_cast<std::size_t>(mesh.face_owner[f]);
+
+            const double area = mesh.face_area[f];
+            const double nx   = mesh.face_normal_x[f];
+            const double ny   = mesh.face_normal_y[f];
+            const double nz   = mesh.face_normal_z[f];
+
+            const double un = u_in * nx + v_in * ny + w_in * nz;
+            const double mdot_b = rho * un * area;
+
+            if (m_dot != nullptr) {
+                m_dot[f] = mdot_b;
+            }
+
+            const double mu_eff = mu + (mut ? mut[owner] : 0.0);
+            const double D_b = mu_eff * area * dist_inv[f];
+
+            const double coeff_rhs = D_b - mdot_b;
+
+            diag[owner]  += D_b;
+            rhs_u[owner] += coeff_rhs * u_in;
+            rhs_v[owner] += coeff_rhs * v_in;
+            rhs_w[owner] += coeff_rhs * w_in;
+        }
     }
 
     void apply_pressure_bc(std::span<double*> diag_p,

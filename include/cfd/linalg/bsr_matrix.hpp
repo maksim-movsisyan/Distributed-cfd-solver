@@ -35,6 +35,9 @@ public:
     const VectorLayout& layout() const override { return layout_; }
     Vector makeVector() const override { return Vector(layout_, bs_); }
     void apply(const Vector& x, Vector& y, double alpha = 1.0, double beta = 0.0) const override;
+    void setZero() noexcept {
+        std::fill(values_.begin(), values_.end(), 0.0);
+    }
 
     // --- raw access (preconditioners, inspection) ---
     const std::vector<LocalIndex>& rowPtr() const { return row_ptr_; }

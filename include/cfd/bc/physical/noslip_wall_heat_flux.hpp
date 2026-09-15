@@ -200,12 +200,26 @@ public:
         }
     }
 
-    void apply_momentum_bc(std::span<double*> diag_u,
-                           std::span<double*> rhs,
-                           const mesh::MeshPart& mesh) const override {
+    void apply_momentum_bc(const mesh::MeshPart& mesh,
+                           const mesh::MeshAuxGeometry& aux_geom,
+                           double* CFD_RESTRICT diag,
+                           double* CFD_RESTRICT rhs_u,
+                           double* CFD_RESTRICT rhs_v,
+                           double* CFD_RESTRICT rhs_w,
+                           double* CFD_RESTRICT m_dot,
+                           const double rho,
+                           const double mu,
+                           const double* CFD_RESTRICT mut = nullptr) const override {
         static_cast<void>(mesh);
-        static_cast<void>(rhs);
-        static_cast<void>(diag_u);
+        static_cast<void>(aux_geom);
+        static_cast<void>(diag);
+        static_cast<void>(rhs_u);
+        static_cast<void>(rhs_v);
+        static_cast<void>(rhs_w);
+        static_cast<void>(m_dot);
+        static_cast<void>(rho);
+        static_cast<void>(mu);
+        static_cast<void>(mut);
     }
 
     void apply_pressure_bc(std::span<double*> diag_p,

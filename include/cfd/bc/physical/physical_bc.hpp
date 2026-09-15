@@ -2,6 +2,7 @@
 
 #include "cfd/core/types.hpp"
 #include "cfd/mesh/localmesh.hpp"
+#include "cfd/mesh/aux_geometry.hpp"
 
 #include <string>
 #include <span>
@@ -92,10 +93,16 @@ public:
      * @param[in,out] rhs Right-hand side vector of the momentum equations [rhs_u, rhs_v, rhs_w].
      * @param[in] mesh Local mesh.
      */
-    virtual void apply_momentum_bc(std::span<double*> diag_u,
-                                   std::span<double*> rhs,
-                                   const mesh::MeshPart& mesh) const = 0;
-
+    virtual void apply_momentum_bc(const mesh::MeshPart& mesh,
+                                   const mesh::MeshAuxGeometry& aux_geom,
+                                   double* CFD_RESTRICT diag,
+                                   double* CFD_RESTRICT rhs_u,
+                                   double* CFD_RESTRICT rhs_v,
+                                   double* CFD_RESTRICT rhs_w,
+                                   double* CFD_RESTRICT m_dot,
+                                   const double rho,
+                                   const double mu,
+                                   const double* CFD_RESTRICT mut = nullptr) const = 0;
      /**
      * @brief Contributes boundary conditions to the Poisson equation for pressure correction p'.
      * @param[in,out] diag_p Diagonal coefficient of the Poisson matrix.

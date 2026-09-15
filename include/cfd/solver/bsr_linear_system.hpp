@@ -20,11 +20,9 @@
 #include "cfd/linalg/bicgstab.hpp"
 
 namespace cfd::solver {
-
-using linalg::detail::mpi_index_type;
-
+    
 /**
- * @class BlockLinearSystem
+ * @class BSRLinearSystem
  * @brief Generic distributed block linear system (A * x = b) assembled on cell-cell face graph.
  *
  * Applicable to:
@@ -36,7 +34,7 @@ using linalg::detail::mpi_index_type;
  * @tparam BlockDim Number of degrees of freedom per mesh cell (block size).
  */
 template <std::size_t BlockDim = 1>
-class BlockLinearSystem {
+class BSRLinearSystem {
 public:
     static constexpr std::size_t kBlockDim  = BlockDim;
     static constexpr std::size_t kBlockSize = BlockDim * BlockDim;
@@ -48,7 +46,7 @@ public:
      * @param solver_params Krylov solver and preconditioner parameters.
      * @param comm          MPI communicator.
      */
-    BlockLinearSystem(const mesh::MeshPart& mesh,
+    BSRLinearSystem(const mesh::MeshPart& mesh,
                       const mesh::MeshAuxConnectivity& aux_conn,
                       const linalg::SolverParams& solver_params,
                       MPI_Comm comm)
@@ -83,7 +81,7 @@ public:
 
     /** @brief Zero-out matrix entries and RHS before assembling a new time step/iteration. */
     void zero() noexcept {
-        std::fill(matrix_->valuesData(), matrix_->valuesData() + matrix_->values().size(), 0.0);
+        matrix_->setZero();
         rhs_.setZero();
         du_.setZero();
     }
